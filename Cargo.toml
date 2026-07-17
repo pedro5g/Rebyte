@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rebyte-format",
+    "crates/rebyte-core",
+    "crates/rebyte-cli",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+authors = ["Pedro Martins (pedro5g)"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pedro5g/Rebyte"
+homepage = "https://github.com/pedro5g/Rebyte"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+multiple_crate_versions = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+lto = true
+
+[profile.bench]
+debug = true

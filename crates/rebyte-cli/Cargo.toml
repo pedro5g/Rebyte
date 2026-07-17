@@ -1,0 +1,23 @@
+[package]
+name = "rebyte-cli"
+description = "Command-line interface for the Rebyte Artifact Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["artifact", "cli", "security"]
+categories = ["command-line-utilities", "filesystem"]
+
+[[bin]]
+name = "rebyte"
+path = "src/main.rs"
+
+[dependencies]
+rebyte-core = { path = "../rebyte-core", version = "0.1.0" }
+
+[lints]
+workspace = true
