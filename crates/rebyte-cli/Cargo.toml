@@ -23,6 +23,7 @@ cap-std.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 rebyte-codec = { path = "../rebyte-codec", version = "1.0.0" }
+rebyte-chain = { path = "../rebyte-chain", version = "1.0.0" }
 rebyte-core = { path = "../rebyte-core", version = "1.0.0" }
 rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
 rebyte-integrity = { path = "../rebyte-integrity", version = "1.0.0" }

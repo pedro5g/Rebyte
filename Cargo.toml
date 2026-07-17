@@ -9,6 +9,7 @@ members = [
     "crates/rebyte-file-token",
     "crates/rebyte-artifact-token",
     "crates/rebyte-semantic",
+    "crates/rebyte-chain",
     "crates/rebyte-signature",
     "crates/rebyte-pack",
     "crates/rebyte-verify",
@@ -47,6 +48,7 @@ zeroize = "1.8"
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 getrandom = "0.4"
 rpassword = "7.5"
+hpke = { version = "0.14", default-features = false, features = ["alloc", "chacha", "getrandom", "x25519"] }
 
 [workspace.package]
 version = "1.2.0"

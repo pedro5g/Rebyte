@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod chain_command;
 mod file_token_command;
 mod hash_command;
 mod keys;
@@ -80,6 +81,8 @@ enum Commands {
     Hash(hash_command::HashCommand),
     /// Create, inspect or safely apply structured JSON/TOML patches.
     Patch(semantic_command::PatchCommand),
+    /// Create self-custodied identities, consensus groups and encrypted capsules.
+    Chain(chain_command::ChainCommand),
     /// Generate and manage publisher key documents.
     Key(keys::KeyCommand),
     /// Inspect bounded capsule metadata; verification status is reported separately.
@@ -241,6 +244,7 @@ fn run() -> Result<(), CliError> {
         Commands::Pack(command) => producer::run(&command),
         Commands::Hash(command) => hash_command::run(&command),
         Commands::Patch(command) => semantic_command::run(&command),
+        Commands::Chain(command) => chain_command::run(&command),
         Commands::Key(command) => keys::run(&command),
         Commands::Inspect(command) => inspect(&command),
         Commands::Verify(command) => verify(&command),

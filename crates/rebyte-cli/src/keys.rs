@@ -298,7 +298,10 @@ fn read_public_document(path: &Path) -> Result<PublicKeyDocument, CliError> {
         .map_err(|error| CliError::new(EXIT_POLICY, error.to_string()))
 }
 
-fn read_passphrase(args: &PassphraseArgs, confirm: bool) -> Result<Zeroizing<String>, CliError> {
+pub(super) fn read_passphrase(
+    args: &PassphraseArgs,
+    confirm: bool,
+) -> Result<Zeroizing<String>, CliError> {
     if let Some(path) = &args.passphrase_file {
         require_private_permissions(path).map_err(|error| {
             CliError::new(
@@ -337,7 +340,7 @@ fn read_passphrase(args: &PassphraseArgs, confirm: bool) -> Result<Zeroizing<Str
     Ok(first)
 }
 
-fn ensure_output_absent(path: &Path) -> Result<(), CliError> {
+pub(super) fn ensure_output_absent(path: &Path) -> Result<(), CliError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err(CliError::new(
             EXIT_GENERIC,
