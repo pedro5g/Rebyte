@@ -85,9 +85,12 @@ impl std::error::Error for CompressionError {}
 ///
 /// # Errors
 ///
-/// Returns [`CompressionError`] when input or output exceeds `limits`, the
-/// resulting expansion ratio would violate policy, native compression fails,
-/// or Zstandard encoding is requested in WebAssembly.
+/// Returns [`CompressionError`] when input or output exceeds `limits`, native
+/// compression fails, or Zstandard encoding is requested in WebAssembly.
+///
+/// Compression-ratio policy is intentionally enforced only while decoding.
+/// Rejecting a locally produced frame because it compresses extremely well
+/// would force the encoder to retain a much larger verbatim representation.
 pub fn compress(
     input: &[u8],
     algorithm: CompressionAlgorithm,
@@ -101,7 +104,6 @@ pub fn compress(
     };
     let output_len = usize_to_u64(output.len())?;
     enforce_compressed_limit(output_len, limits)?;
-    enforce_ratio(output_len, input_len, limits)?;
     Ok(output)
 }
 
@@ -282,6 +284,32 @@ mod tests {
                 CompressionAlgorithm::Zstd,
                 u64::try_from(bytes.len()).map_err(|_| CompressionError::LengthOverflow)?,
                 &SecurityLimits::V1,
+            )?,
+            bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn encoding_does_not_reject_extreme_compression_ratio() -> Result<(), CompressionError> {
+        let bytes = vec![b'x'; 2 * 1_024 * 1_024];
+        let compressed = compress(&bytes, CompressionAlgorithm::Zstd, &SecurityLimits::V1)?;
+        assert!(compressed.len() < bytes.len() / 200);
+        assert!(matches!(
+            decompress(
+                &compressed,
+                CompressionAlgorithm::Zstd,
+                u64::try_from(bytes.len()).map_err(|_| CompressionError::LengthOverflow)?,
+                &SecurityLimits::V1,
+            ),
+            Err(CompressionError::CompressionRatioExceeded { .. })
+        ));
+        assert_eq!(
+            decompress(
+                &compressed,
+                CompressionAlgorithm::Zstd,
+                u64::try_from(bytes.len()).map_err(|_| CompressionError::LengthOverflow)?,
+                &SecurityLimits::SIMPLE_ARTIFACT,
             )?,
             bytes
         );

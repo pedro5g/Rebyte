@@ -51,10 +51,12 @@ and `zstd` remain valid canonical representations.
 7. Compute the domain-separated file digest and compare it in constant time.
 8. Release reconstructed bytes only after every check succeeds.
 
-The default limits are inherited from `SecurityLimits::V1`: 48 MiB text,
-34 MiB decoded token, 32 MiB stored payload, 64 MiB single reconstructed file
-and a 200:1 maximum expansion ratio. Encoders self-decode and verify their
-result before returning it.
+The default limits are inherited from `SecurityLimits::SIMPLE_ARTIFACT`: 48 MiB
+text, 34 MiB decoded token, 32 MiB stored payload and a 64 MiB single
+reconstructed file. Simple tokens permit extreme compression ratios because
+the absolute reconstructed-size bound remains mandatory. RAP v1 capsules keep
+their separate 200:1 policy. Encoders self-decode and verify their result
+before returning it.
 
 ## Compatibility
 

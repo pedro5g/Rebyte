@@ -36,6 +36,16 @@ impl SecurityLimits {
         max_path_bytes: 1_024,
         max_compression_ratio: 200,
     };
+
+    /// Conservative limits for unsigned, self-contained local artifacts.
+    ///
+    /// Unlike RAP v1, the simple artifact format permits legitimate inputs
+    /// with an extreme compression ratio. The absolute reconstructed-size
+    /// bound remains mandatory and is the primary decompression-bomb defense.
+    pub const SIMPLE_ARTIFACT: Self = Self {
+        max_compression_ratio: u64::MAX,
+        ..Self::V1
+    };
 }
 
 impl Default for SecurityLimits {
@@ -55,5 +65,15 @@ mod tests {
         assert!(limits.max_compressed_payload_bytes < limits.max_token_bytes);
         assert!(limits.max_single_file_bytes <= limits.max_uncompressed_payload_bytes);
         assert!(limits.max_file_count > 0);
+    }
+
+    #[test]
+    fn simple_artifacts_rely_on_the_absolute_output_bound() {
+        let limits = SecurityLimits::SIMPLE_ARTIFACT;
+        assert_eq!(
+            limits.max_uncompressed_payload_bytes,
+            SecurityLimits::V1.max_uncompressed_payload_bytes
+        );
+        assert_eq!(limits.max_compression_ratio, u64::MAX);
     }
 }

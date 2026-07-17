@@ -76,9 +76,7 @@ pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
             },
         )?
     };
-    let options = FileTokenOptions::default()
-        .with_compression(command.compression.to_policy())
-        .with_limits(SecurityLimits::V1);
+    let options = FileTokenOptions::default().with_compression(command.compression.to_policy());
     let encoded = encode_file_token(&bytes, &options).map_err(encode_error)?;
     if let Some(output) = &command.output {
         let mut token_file = Vec::with_capacity(encoded.token().len().saturating_add(1));
@@ -138,7 +136,8 @@ pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
 
 pub(super) fn decode(command: &DecodeCommand) -> Result<(), CliError> {
     let token = read_token(command)?;
-    let decoded = decode_file_token(&token, &SecurityLimits::V1).map_err(decode_error)?;
+    let decoded =
+        decode_file_token(&token, &SecurityLimits::SIMPLE_ARTIFACT).map_err(decode_error)?;
     write_new(&command.output, decoded.bytes(), false).map_err(|error| {
         CliError::new(
             EXIT_GENERIC,

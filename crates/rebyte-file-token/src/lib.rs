@@ -71,7 +71,7 @@ impl Default for FileTokenOptions {
     fn default() -> Self {
         Self {
             compression: FileTokenCompression::Auto,
-            limits: SecurityLimits::V1,
+            limits: SecurityLimits::SIMPLE_ARTIFACT,
         }
     }
 }
@@ -455,11 +455,7 @@ fn select_payload(
                 Ok(compressed) if compressed.len() < bytes.len() => {
                     Ok((CompressionAlgorithm::Zstd, compressed))
                 }
-                Ok(_)
-                | Err(
-                    CompressionError::CompressionRatioExceeded { .. }
-                    | CompressionError::UnsupportedEncoder,
-                ) => Ok((
+                Ok(_) | Err(CompressionError::UnsupportedEncoder) => Ok((
                     CompressionAlgorithm::None,
                     compress(bytes, CompressionAlgorithm::None, &options.limits)?,
                 )),
@@ -535,6 +531,19 @@ mod tests {
         assert!(encoded.token().len() < text.len() / 4);
         let decoded = decode_file_token(encoded.token(), &SecurityLimits::V1)?;
         assert_eq!(decoded.bytes(), text.as_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn extremely_repetitive_text_does_not_fall_back_to_verbatim() -> Result<(), FileTokenError> {
+        let bytes = vec![b'R'; 8 * 1_024 * 1_024];
+        let encoded = encode_file_token(&bytes, &FileTokenOptions::default())?;
+        assert_eq!(encoded.compression(), CompressionAlgorithm::Zstd);
+        assert!(encoded.stored_size() < encoded.original_size() / 200);
+        assert_eq!(
+            decode_file_token(encoded.token(), &SecurityLimits::SIMPLE_ARTIFACT)?.bytes(),
+            bytes
+        );
         Ok(())
     }
 
