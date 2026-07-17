@@ -1,0 +1,5 @@
+; Rebyte textual token grammar. RFC 5234 core rules are assumed.
+
+rebyte-token = "rb1_" 1*(ALPHA / DIGIT / "-" / "_")
+
+; Padding and internal whitespace are deliberately absent.

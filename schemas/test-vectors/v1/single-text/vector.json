@@ -1,0 +1,18 @@
+{
+  "id": "single-text",
+  "status": "valid",
+  "compression": "none",
+  "publisher": "rebyte-test-only",
+  "files": [
+    {
+      "path": "src/hello.txt",
+      "bytesBase64": "aGVsbG8sIHJlYnl0ZSEK",
+      "contentKind": "textUtf8",
+      "executable": false
+    }
+  ],
+  "expected": {
+    "fileCount": 1,
+    "uncompressedPayloadSize": 15
+  }
+}

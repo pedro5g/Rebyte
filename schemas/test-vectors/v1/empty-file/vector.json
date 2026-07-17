@@ -1,0 +1,18 @@
+{
+  "id": "empty-file",
+  "status": "valid",
+  "compression": "none",
+  "publisher": "rebyte-test-only",
+  "files": [
+    {
+      "path": "empty.txt",
+      "bytesBase64": "",
+      "contentKind": "textUtf8",
+      "executable": false
+    }
+  ],
+  "expected": {
+    "fileCount": 1,
+    "uncompressedPayloadSize": 0
+  }
+}

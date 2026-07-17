@@ -1,0 +1,14 @@
+{
+  "id": "path-traversal",
+  "status": "invalid",
+  "stage": "path-validation",
+  "files": [
+    {
+      "path": "../outside.txt",
+      "bytesBase64": "bmV2ZXIgd3JpdGUgbWUK",
+      "contentKind": "textUtf8",
+      "executable": false
+    }
+  ],
+  "expectedError": "parent-directory-component"
+}

@@ -1,0 +1,18 @@
+{
+  "id": "unicode",
+  "status": "valid",
+  "compression": "none",
+  "publisher": "rebyte-test-only",
+  "files": [
+    {
+      "path": "dados/ação.txt",
+      "bytesBase64": "Y2Fmw6kg4piVCg==",
+      "contentKind": "textUtf8",
+      "executable": false
+    }
+  ],
+  "expected": {
+    "fileCount": 1,
+    "uncompressedPayloadSize": 10
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "id": "multiple-binary",
+  "status": "valid",
+  "compression": "none",
+  "publisher": "rebyte-test-only",
+  "files": [
+    {
+      "path": "bin/data.bin",
+      "bytesBase64": "AAEC/4A=",
+      "contentKind": "binary",
+      "executable": false
+    },
+    {
+      "path": "scripts/run",
+      "bytesBase64": "IyEvYmluL3NoCg==",
+      "contentKind": "textUtf8",
+      "executable": true
+    }
+  ],
+  "expected": {
+    "fileCount": 2,
+    "uncompressedPayloadSize": 15
+  }
+}
