@@ -49,6 +49,11 @@ streaming decompression. Signed output size, absolute limits and compression
 ratio are checked before and during expansion; the Wasm build uses a pure-Rust
 decoder and intentionally cannot encode Zstandard.
 
+`rebyte-signature` verifies Ed25519 signatures only after resolving the derived
+key ID in a local keyring. Production is the default channel; staging and
+development require explicit policy, while retired, revoked and unknown keys
+are rejected.
+
 ## License
 
 Licensed under either Apache License, Version 2.0 or the MIT license, at your

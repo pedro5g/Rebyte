@@ -5,6 +5,7 @@ members = [
     "crates/rebyte-codec",
     "crates/rebyte-integrity",
     "crates/rebyte-compression",
+    "crates/rebyte-signature",
     "crates/rebyte-core",
     "crates/rebyte-cli",
     "xtask",
@@ -16,6 +17,7 @@ blake3 = { version = "1.8", default-features = false }
 subtle = { version = "2.6", default-features = false }
 ruzstd = { version = "0.8", default-features = false, features = ["std"] }
 zstd = { version = "0.13", default-features = false }
+ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc", "zeroize"] }
 
 [workspace.package]
 version = "0.1.0"
