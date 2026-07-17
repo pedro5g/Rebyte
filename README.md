@@ -64,6 +64,11 @@ PayloadVerified → FullyVerified`; only the last state exposes reconstructed
 files to future diff and apply crates. `rebyte-core` re-exports the stable pack,
 sign and verify facade.
 
+The CLI currently provides bounded `inspect`, full `verify`, capability-confined
+`diff`, `doctor` and shell `completions`. Input may be an `rb1_` token, `-` for
+stdin, or `--file artifact.rbc`. The bundled development public key is rejected
+unless `--trust-channel development` is explicit.
+
 ## License
 
 Licensed under either Apache License, Version 2.0 or the MIT license, at your

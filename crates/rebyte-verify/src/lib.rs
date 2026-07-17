@@ -104,6 +104,12 @@ impl StructurallyValidCapsule {
         &self.decoded.manifest
     }
 
+    /// Returns the untrusted claimed capsule digest for inspection.
+    #[must_use]
+    pub const fn claimed_capsule_digest(&self) -> Digest32 {
+        self.decoded.capsule_digest
+    }
+
     /// Verifies capsule digest, key policy and Ed25519 signature.
     ///
     /// # Errors

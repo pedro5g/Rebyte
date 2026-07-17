@@ -16,3 +16,4 @@ and releases follow Semantic Versioning.
 - Ed25519 verification with explicit publisher channel and key status policy.
 - Deterministic artifact packager with canonical ordering and file digests.
 - Typestate signing and verification pipeline with byte-exact reconstruction.
+- Read-only `inspect`, `verify`, `diff`, `doctor` and completion CLI commands.

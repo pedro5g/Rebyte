@@ -17,7 +17,15 @@ name = "rebyte"
 path = "src/main.rs"
 
 [dependencies]
+clap.workspace = true
+clap_complete.workspace = true
+rebyte-codec = { path = "../rebyte-codec", version = "0.1.0" }
 rebyte-core = { path = "../rebyte-core", version = "0.1.0" }
+rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+rebyte-signature = { path = "../rebyte-signature", version = "0.1.0" }
+rebyte-verify = { path = "../rebyte-verify", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

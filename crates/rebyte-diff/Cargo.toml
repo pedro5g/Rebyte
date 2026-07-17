@@ -1,0 +1,20 @@
+[package]
+name = "rebyte-diff"
+description = "Read-only filesystem diff for verified Rebyte capsules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+cap-std.workspace = true
+rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+rebyte-verify = { path = "../rebyte-verify", version = "0.1.0" }
+similar.workspace = true
+
+[lints]
+workspace = true

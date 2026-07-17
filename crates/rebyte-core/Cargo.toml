@@ -13,6 +13,7 @@ keywords = ["artifact", "capsule", "security"]
 categories = ["filesystem", "encoding"]
 
 [dependencies]
+rebyte-diff = { path = "../rebyte-diff", version = "0.1.0" }
 rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
 rebyte-pack = { path = "../rebyte-pack", version = "0.1.0" }
 rebyte-signature = { path = "../rebyte-signature", version = "0.1.0" }
