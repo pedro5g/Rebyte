@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 rebyte-codec = { path = "../crates/rebyte-codec" }
 rebyte-compression = { path = "../crates/rebyte-compression" }
+rebyte-chain = { path = "../crates/rebyte-chain" }
 rebyte-format = { path = "../crates/rebyte-format" }
 rebyte-file-token = { path = "../crates/rebyte-file-token" }
 
@@ -45,6 +46,13 @@ bench = false
 [[bin]]
 name = "decode_file_token"
 path = "fuzz_targets/decode_file_token.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_chain_envelope"
+path = "fuzz_targets/decode_chain_envelope.rs"
 test = false
 doc = false
 bench = false

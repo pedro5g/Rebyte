@@ -42,7 +42,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [decode_capsule, decode_token, portable_path, decompress]
+        target:
+          - decode_capsule
+          - decode_token
+          - decode_chain_envelope
+          - portable_path
+          - decompress
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
