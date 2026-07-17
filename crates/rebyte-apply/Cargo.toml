@@ -1,0 +1,30 @@
+[package]
+name = "rebyte-apply"
+description = "Recoverable filesystem transactions for verified Rebyte capsules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+cap-fs-ext.workspace = true
+cap-std.workspace = true
+rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+rebyte-integrity = { path = "../rebyte-integrity", version = "0.1.0" }
+rebyte-verify = { path = "../rebyte-verify", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+rebyte-pack = { path = "../rebyte-pack", version = "0.1.0" }
+rebyte-signature = { path = "../rebyte-signature", version = "0.1.0" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

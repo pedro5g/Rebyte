@@ -69,6 +69,12 @@ The CLI currently provides bounded `inspect`, full `verify`, capability-confined
 stdin, or `--file artifact.rbc`. The bundled development public key is rejected
 unless `--trust-channel development` is explicit.
 
+`rebyte-apply` accepts only `FullyVerifiedCapsule`, stages and re-hashes every
+file, snapshots target preconditions, rejects symlinks, journals each state and
+uses same-filesystem atomic renames. A multi-file operation may be partially
+visible during a crash, but retained staging and backups support resume or
+rollback; global multi-file atomicity is not claimed.
+
 ## License
 
 Licensed under either Apache License, Version 2.0 or the MIT license, at your
