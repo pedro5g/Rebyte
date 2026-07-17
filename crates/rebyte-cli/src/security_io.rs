@@ -101,7 +101,7 @@ fn validate_private_mode(_metadata: &fs::Metadata) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn sync_parent(path: &Path) -> io::Result<()> {
+pub(super) fn sync_parent(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|value| !value.as_os_str().is_empty())
@@ -110,6 +110,6 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> io::Result<()> {
+pub(super) fn sync_parent(_path: &Path) -> io::Result<()> {
     Ok(())
 }

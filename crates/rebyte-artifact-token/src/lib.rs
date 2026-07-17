@@ -15,7 +15,7 @@ mod model;
 
 pub use codec::{
     ARTIFACT_HEADER_SIZE, ARTIFACT_TOKEN_PREFIX, decode_artifact, decode_artifact_token,
-    encode_artifact, encode_artifact_token,
+    encode_artifact, encode_artifact_binary_token, encode_artifact_token,
 };
 pub use error::ArtifactTokenError;
 pub use model::{

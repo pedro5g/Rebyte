@@ -57,9 +57,9 @@ const DEVELOPMENT_PUBLIC_KEY: [u8; 32] = [
 #[command(
     name = "rebyte",
     version,
-    about = "Reconstruct files exactly with simple tokens or signed RAP capsules",
-    long_about = "Rebyte creates byte-exact unsigned file tokens and deterministic signed RAP v1 capsules without network access, command execution or lifecycle hooks.",
-    after_help = "Simple: rebyte encode FILE > file.rf1\n        rebyte decode --file file.rf1 -o COPY\nSigned: rebyte key generate --name 'My publisher'",
+    about = "Reconstruct files and folders exactly with simple artifacts or signed capsules",
+    long_about = "Rebyte creates byte-exact unsigned artifact tokens and deterministic signed RAP v1 capsules without network access, command execution or lifecycle hooks.",
+    after_help = "Simple: rebyte encode FILE --include-name > file.ra1\n        rebyte decode --file file.ra1 --accept-suggested-path\nLarge:  rebyte encode FOLDER --format binary -o backup.rba\nSigned: rebyte key generate --name 'My publisher'",
     styles = CLI_STYLES
 )]
 struct Cli {
@@ -69,9 +69,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Encode one file as an unsigned, compressed and integrity-checked token.
+    /// Encode one file or folder as an unsigned, integrity-checked artifact.
     Encode(file_token_command::EncodeCommand),
-    /// Verify and reconstruct one unsigned file token byte for byte.
+    /// Preview or reconstruct an unsigned artifact byte for byte.
     Decode(file_token_command::DecodeCommand),
     /// Pack a directory, sign it and self-verify the resulting capsule.
     Pack(producer::PackCommand),

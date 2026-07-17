@@ -128,11 +128,24 @@ pub fn encode_artifact_token(
     options: &ArtifactOptions,
 ) -> Result<String, ArtifactTokenError> {
     let encoded = encode_artifact(artifact, options)?;
-    let token = format!(
-        "{ARTIFACT_TOKEN_PREFIX}{}",
-        URL_SAFE_NO_PAD.encode(encoded.binary())
-    );
-    enforce_token_size(usize_to_u64(token.len())?, &options.limits)?;
+    encode_artifact_binary_token(encoded.binary(), &options.limits)
+}
+
+/// Represents existing `.rba` bytes as `ra1_` Base64URL text.
+///
+/// This operation changes only the outer representation. Use
+/// [`decode_artifact`] when the source bytes have not already been verified.
+///
+/// # Errors
+///
+/// Returns [`ArtifactTokenError::TokenTooLarge`] when textual expansion
+/// exceeds local policy.
+pub fn encode_artifact_binary_token(
+    binary: &[u8],
+    limits: &SecurityLimits,
+) -> Result<String, ArtifactTokenError> {
+    let token = format!("{ARTIFACT_TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(binary));
+    enforce_token_size(usize_to_u64(token.len())?, limits)?;
     Ok(token)
 }
 

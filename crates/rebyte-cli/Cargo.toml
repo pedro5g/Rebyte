@@ -33,12 +33,12 @@ rebyte-verify = { path = "../rebyte-verify", version = "1.0.0" }
 rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
 rebyte-pack = { path = "../rebyte-pack", version = "1.0.0" }
-tempfile.workspace = true
 
 [lints]
 workspace = true

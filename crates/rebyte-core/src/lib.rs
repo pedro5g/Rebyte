@@ -11,7 +11,7 @@ pub use rebyte_artifact_token::{
     ARTIFACT_HEADER_SIZE, ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactEntry,
     ArtifactEntryKind, ArtifactKind, ArtifactOptions, ArtifactTokenError, DecodedArtifact,
     EncodedArtifact, decode_artifact, decode_artifact_token, encode_artifact,
-    encode_artifact_token,
+    encode_artifact_binary_token, encode_artifact_token,
 };
 pub use rebyte_diff::{ChangeKind, DiffEntry, DiffError, DiffReport, DiffSummary, diff_capsule};
 pub use rebyte_file_token::{

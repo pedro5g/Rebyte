@@ -287,6 +287,16 @@ impl EncodedArtifact {
         self.binary
     }
 
+    /// Returns canonical `ra1_` text for these exact envelope bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactTokenError::TokenTooLarge`] when Base64URL expansion
+    /// exceeds the supplied local policy.
+    pub fn to_token(&self, limits: &SecurityLimits) -> Result<String, ArtifactTokenError> {
+        crate::codec::encode_artifact_binary_token(&self.binary, limits)
+    }
+
     /// Returns whether this contains one file or a directory.
     #[must_use]
     pub const fn kind(&self) -> ArtifactKind {

@@ -1,24 +1,28 @@
-//! Simple unsigned file-token CLI commands.
+//! Simple unsigned artifact CLI commands.
 
 #![allow(clippy::redundant_pub_crate)]
 
-use std::io::{self, Read as _};
-use std::path::PathBuf;
+use std::fs;
+use std::io::{self, Read as _, Write as _};
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use rebyte_core::{
-    CompressionProfile, FileTokenCompression, FileTokenError, FileTokenOptions, decode_file_token,
-    encode_file_token,
+    ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactEntry, ArtifactEntryKind,
+    ArtifactKind, ArtifactOptions, ArtifactTokenError, CompressionProfile, DecodedArtifact,
+    FileTokenError, decode_artifact, decode_artifact_token, decode_file_token, encode_artifact,
 };
-use rebyte_format::{CompressionAlgorithm, SecurityLimits};
+use rebyte_format::{CompressionAlgorithm, RelativeArtifactPath, SecurityLimits};
 use serde::Serialize;
 
-use super::security_io::{read_bounded_nofollow, write_new};
+use super::security_io::{read_bounded_nofollow, sync_parent, write_new};
 use super::{CliError, EXIT_DIGEST, EXIT_GENERIC, EXIT_MALFORMED, encode_digest, write_json};
+
+const BINARY_MAGIC: &[u8; 4] = b"RBAT";
 
 #[derive(Debug, Args)]
 pub(super) struct EncodeCommand {
-    /// File to encode, or `-` for standard input.
+    /// File, directory or `-` for standard input.
     input: PathBuf,
     /// Compression strategy; `auto` keeps Zstandard only when smaller.
     #[arg(long, value_enum, default_value = "auto")]
@@ -26,25 +30,56 @@ pub(super) struct EncodeCommand {
     /// Zstandard speed-versus-size policy.
     #[arg(long, value_enum, default_value = "balanced")]
     profile: ProfileArgument,
-    /// Write the token to a new file instead of standard output.
+    /// Embed the source basename as an untrusted reconstruction hint.
+    #[arg(long)]
+    include_name: bool,
+    /// Embed this portable basename instead of the source basename.
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+    /// Embed a portable relative destination hint.
+    #[arg(long, value_name = "RELATIVE_PATH")]
+    suggest_path: Option<String>,
+    /// Emit an inline token or raw `.rba` binary envelope.
+    #[arg(long, value_enum, default_value = "token")]
+    format: RepresentationArgument,
+    /// Write into a new file instead of standard output.
     #[arg(short, long, value_name = "PATH")]
     output: Option<PathBuf>,
-    /// Emit a stable JSON report; includes the token when `--output` is absent.
+    /// Emit a stable JSON report; includes inline text when no output is used.
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 pub(super) struct DecodeCommand {
-    /// `rf1_` token, or `-` to read a token from standard input.
+    /// `ra1_`/legacy `rf1_` token, or `-` to read text from standard input.
     #[arg(value_name = "TOKEN", conflicts_with = "token_file")]
     token: Option<String>,
-    /// Read a newline-terminated `rf1_` token from a file.
+    /// Read an `ra1_`, legacy `rf1_` or binary `.rba` from a file.
     #[arg(long = "file", value_name = "PATH", conflicts_with = "token")]
     token_file: Option<PathBuf>,
-    /// Reconstruct into this new file; existing paths are never overwritten.
-    #[arg(short, long, value_name = "PATH")]
-    output: PathBuf,
+    /// Exact output path; overrides all embedded destination metadata.
+    #[arg(
+        short,
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["accept_suggested_path", "name"]
+    )]
+    output: Option<PathBuf>,
+    /// Root below which an accepted relative destination will be reconstructed.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Explicitly allow use of the token's untrusted destination metadata.
+    #[arg(long)]
+    accept_suggested_path: bool,
+    /// Override the final suggested basename.
+    #[arg(
+        long,
+        value_name = "NAME",
+        requires = "accept_suggested_path",
+        conflicts_with = "output"
+    )]
+    name: Option<String>,
     /// Emit a stable JSON report.
     #[arg(long)]
     json: bool,
@@ -55,6 +90,16 @@ enum CompressionArgument {
     Auto,
     Zstd,
     None,
+}
+
+impl CompressionArgument {
+    const fn to_policy(self) -> ArtifactCompression {
+        match self {
+            Self::Auto => ArtifactCompression::Auto,
+            Self::Zstd => ArtifactCompression::Zstd,
+            Self::None => ArtifactCompression::None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -74,42 +119,68 @@ impl ProfileArgument {
     }
 }
 
-impl CompressionArgument {
-    const fn to_policy(self) -> FileTokenCompression {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RepresentationArgument {
+    Token,
+    Binary,
+}
+
+impl RepresentationArgument {
+    const fn name(self) -> &'static str {
         match self {
-            Self::Auto => FileTokenCompression::Auto,
-            Self::Zstd => FileTokenCompression::Zstd,
-            Self::None => FileTokenCompression::None,
+            Self::Token => "token",
+            Self::Binary => "binary",
         }
     }
 }
 
 pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
-    let bytes = if command.input.as_os_str() == "-" {
-        read_bounded(io::stdin().lock(), SecurityLimits::V1.max_single_file_bytes)?
-    } else {
-        read_bounded_nofollow(&command.input, SecurityLimits::V1.max_single_file_bytes).map_err(
-            |error| {
-                CliError::new(
-                    EXIT_GENERIC,
-                    format!("cannot read file-token input: {error}"),
-                )
-            },
-        )?
-    };
-    let options = FileTokenOptions::default()
+    if command.format == RepresentationArgument::Binary && command.output.is_none() {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "--format binary requires --output to protect the terminal",
+        ));
+    }
+    let mut artifact = read_source(command)?;
+    if let Some(name) = selected_name(command)? {
+        artifact = artifact
+            .with_suggested_name(&name)
+            .map_err(artifact_encode_error)?;
+    }
+    if let Some(path) = &command.suggest_path {
+        artifact =
+            artifact.with_suggested_path(RelativeArtifactPath::new(path).map_err(|error| {
+                CliError::new(EXIT_MALFORMED, format!("invalid suggested path: {error}"))
+            })?);
+    }
+    let options = ArtifactOptions::default()
         .with_compression(command.compression.to_policy())
         .with_profile(command.profile.to_profile());
-    let encoded = encode_file_token(&bytes, &options).map_err(encode_error)?;
+    let encoded = encode_artifact(&artifact, &options).map_err(artifact_encode_error)?;
+    let token = if command.format == RepresentationArgument::Token {
+        Some(
+            encoded
+                .to_token(&options.limits)
+                .map_err(artifact_encode_error)?,
+        )
+    } else {
+        None
+    };
     if let Some(output) = &command.output {
-        let mut token_file = Vec::with_capacity(encoded.token().len().saturating_add(1));
-        token_file.extend_from_slice(encoded.token().as_bytes());
-        token_file.push(b'\n');
-        write_new(output, &token_file, false).map_err(|error| {
+        let bytes = token.as_ref().map_or_else(
+            || encoded.binary().to_vec(),
+            |value| {
+                let mut bytes = Vec::with_capacity(value.len().saturating_add(1));
+                bytes.extend_from_slice(value.as_bytes());
+                bytes.push(b'\n');
+                bytes
+            },
+        );
+        write_new(output, &bytes, false).map_err(|error| {
             CliError::new(
                 EXIT_GENERIC,
                 format!(
-                    "cannot create file-token output {}: {error}",
+                    "cannot create artifact output {}: {error}",
                     output.display()
                 ),
             )
@@ -117,110 +188,606 @@ pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
     }
 
     let report = EncodeReport {
-        schema_version: 1,
-        kind: "unsignedFileToken",
+        schema_version: 2,
+        kind: "unsignedArtifact",
+        artifact_kind: artifact_kind_name(encoded.kind()),
         authenticated: false,
-        digest: encode_digest(&encoded.digest()),
+        content_digest: encode_digest(&encoded.content_digest()),
+        envelope_digest: encode_digest(&encoded.envelope_digest()),
+        entries: encoded.entry_count(),
         original_bytes: encoded.original_size(),
         stored_bytes: encoded.stored_size(),
-        token_bytes: u64::try_from(encoded.token().len())
-            .map_err(|_| CliError::new(EXIT_GENERIC, "file-token length overflow"))?,
-        compression: compression_name(encoded.compression()),
+        representation: command.format.name(),
         output: command
             .output
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
-        token: command.output.is_none().then_some(encoded.token()),
+        token: if command.output.is_none() {
+            token.as_deref()
+        } else {
+            None
+        },
     };
     if command.json {
         write_json(&report)
-    } else if command.output.is_none() {
-        println!("{}", encoded.token());
+    } else if let Some(token) = report.token {
+        println!("{token}");
         Ok(())
     } else {
-        println!(
-            "{}",
-            super::ui::success("✓ Unsigned file token encoded and self-verified")
-        );
-        println!("  Input       {} bytes", report.original_bytes);
-        println!(
-            "  Stored      {} bytes ({})",
-            report.stored_bytes, report.compression
-        );
-        println!("  Token       {} bytes", report.token_bytes);
-        println!("  Digest      {}", report.digest);
-        if let Some(output) = &report.output {
-            println!("  Output      {output}");
-        }
-        println!("  Authenticity unsigned · integrity only");
+        print_encode_report(&report);
         Ok(())
     }
 }
 
 pub(super) fn decode(command: &DecodeCommand) -> Result<(), CliError> {
-    let token = read_token(command)?;
-    let decoded =
-        decode_file_token(&token, &SecurityLimits::SIMPLE_ARTIFACT).map_err(decode_error)?;
-    write_new(&command.output, decoded.bytes(), false).map_err(|error| {
-        CliError::new(
-            EXIT_GENERIC,
-            format!(
-                "cannot create reconstructed file {}: {error}",
-                command.output.display()
-            ),
-        )
-    })?;
+    match read_input(command)? {
+        SimpleInput::LegacyToken(token) => decode_legacy(command, &token),
+        SimpleInput::ArtifactToken(token) => {
+            let decoded = decode_artifact_token(&token, &SecurityLimits::SIMPLE_ARTIFACT)
+                .map_err(artifact_decode_error)?;
+            decode_artifact_command(command, &decoded)
+        }
+        SimpleInput::ArtifactBinary(binary) => {
+            let decoded = decode_artifact(&binary, &SecurityLimits::SIMPLE_ARTIFACT)
+                .map_err(artifact_decode_error)?;
+            decode_artifact_command(command, &decoded)
+        }
+    }
+}
+
+fn decode_artifact_command(
+    command: &DecodeCommand,
+    decoded: &DecodedArtifact,
+) -> Result<(), CliError> {
+    let target = resolve_target(command, decoded.artifact())?;
+    if let Some(path) = &target {
+        restore(decoded.artifact(), path)?;
+    }
     let report = DecodeReport {
-        schema_version: 1,
-        kind: "unsignedFileToken",
+        schema_version: 2,
+        kind: "unsignedArtifact",
+        artifact_kind: artifact_kind_name(decoded.artifact().kind()),
         authenticated: false,
         integrity_verified: true,
-        digest: encode_digest(&decoded.digest()),
+        content_digest: encode_digest(&decoded.content_digest()),
+        envelope_digest: encode_digest(&decoded.envelope_digest()),
+        entries: u32::try_from(decoded.artifact().entries().len())
+            .map_err(|_| CliError::new(EXIT_GENERIC, "artifact entry count overflow"))?,
         reconstructed_bytes: decoded.original_size(),
         stored_bytes: decoded.stored_size(),
         compression: compression_name(decoded.compression()),
-        output: command.output.to_string_lossy().into_owned(),
+        suggested_name: decoded.artifact().suggested_name(),
+        suggested_path: decoded
+            .artifact()
+            .suggested_path()
+            .map(RelativeArtifactPath::as_str),
+        output: target
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned()),
+        written: target.is_some(),
     };
     if command.json {
         write_json(&report)
     } else {
+        print_decode_report(&report);
+        Ok(())
+    }
+}
+
+fn decode_legacy(command: &DecodeCommand, token: &str) -> Result<(), CliError> {
+    let output = command.output.as_ref().ok_or_else(|| {
+        CliError::new(
+            EXIT_MALFORMED,
+            "legacy rf1_ tokens have no destination metadata; pass --output",
+        )
+    })?;
+    let decoded =
+        decode_file_token(token, &SecurityLimits::SIMPLE_ARTIFACT).map_err(legacy_decode_error)?;
+    create_parent(output)?;
+    write_new(output, decoded.bytes(), false).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!(
+                "cannot create reconstructed file {}: {error}",
+                output.display()
+            ),
+        )
+    })?;
+    if command.json {
+        write_json(&LegacyDecodeReport {
+            schema_version: 1,
+            kind: "unsignedFileToken",
+            authenticated: false,
+            integrity_verified: true,
+            digest: encode_digest(&decoded.digest()),
+            reconstructed_bytes: decoded.original_size(),
+            stored_bytes: decoded.stored_size(),
+            compression: compression_name(decoded.compression()),
+            output: output.to_string_lossy().into_owned(),
+        })
+    } else {
         println!(
             "{}",
-            super::ui::success("✓ Unsigned file token verified and reconstructed")
+            super::ui::success("✓ Legacy file token verified and reconstructed")
         );
-        println!("  Output      {}", report.output);
-        println!("  Bytes       {}", report.reconstructed_bytes);
-        println!("  Compression {}", report.compression);
-        println!("  Digest      {}", report.digest);
+        println!("  Output      {}", output.display());
+        println!("  Bytes       {}", decoded.original_size());
+        println!("  Digest      {}", encode_digest(&decoded.digest()));
         println!("  Authenticity unsigned · integrity only");
         Ok(())
     }
 }
 
-fn read_token(command: &DecodeCommand) -> Result<String, CliError> {
-    let value = if let Some(path) = &command.token_file {
-        let bytes =
-            read_bounded_nofollow(path, SecurityLimits::V1.max_token_bytes).map_err(|error| {
-                CliError::new(EXIT_GENERIC, format!("cannot read file token: {error}"))
-            })?;
-        String::from_utf8(bytes)
-            .map_err(|_| CliError::new(EXIT_MALFORMED, "file token is not UTF-8"))?
+fn read_source(command: &EncodeCommand) -> Result<Artifact, CliError> {
+    let limits = SecurityLimits::SIMPLE_ARTIFACT;
+    if command.input.as_os_str() == "-" {
+        let bytes = read_bounded(io::stdin().lock(), limits.max_single_file_bytes)?;
+        return Ok(Artifact::file(bytes, false));
+    }
+    let metadata = fs::symlink_metadata(&command.input).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!("cannot inspect artifact input: {error}"),
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "artifact input cannot be a symbolic link",
+        ));
+    }
+    if metadata.is_file() {
+        let bytes = read_bounded_nofollow(&command.input, limits.max_single_file_bytes).map_err(
+            |error| CliError::new(EXIT_GENERIC, format!("cannot read artifact input: {error}")),
+        )?;
+        return Ok(Artifact::file(bytes, is_executable(&metadata)));
+    }
+    if metadata.is_dir() {
+        let mut entries = Vec::new();
+        collect_directory(&command.input, &command.input, &mut entries, &limits)?;
+        return Ok(Artifact::directory(entries));
+    }
+    Err(CliError::new(
+        EXIT_MALFORMED,
+        "artifact input must be a regular file or directory",
+    ))
+}
+
+fn collect_directory(
+    root: &Path,
+    directory: &Path,
+    entries: &mut Vec<ArtifactEntry>,
+    limits: &SecurityLimits,
+) -> Result<(), CliError> {
+    let iterator = fs::read_dir(directory).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!("cannot read directory {}: {error}", directory.display()),
+        )
+    })?;
+    let mut children = iterator
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot read directory: {error}")))?;
+    children.sort_by_key(fs::DirEntry::file_name);
+    for child in children {
+        let path = child.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            CliError::new(
+                EXIT_GENERIC,
+                format!("cannot inspect {}: {error}", path.display()),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(CliError::new(
+                EXIT_MALFORMED,
+                format!("symbolic link is forbidden: {}", path.display()),
+            ));
+        }
+        let portable = portable_relative(root, &path, limits)?;
+        if metadata.is_dir() {
+            push_entry(entries, ArtifactEntry::directory(portable), limits)?;
+            collect_directory(root, &path, entries, limits)?;
+        } else if metadata.is_file() {
+            let bytes =
+                read_bounded_nofollow(&path, limits.max_single_file_bytes).map_err(|error| {
+                    CliError::new(
+                        EXIT_GENERIC,
+                        format!("cannot read artifact file {}: {error}", path.display()),
+                    )
+                })?;
+            push_entry(
+                entries,
+                ArtifactEntry::file(portable, bytes, is_executable(&metadata)),
+                limits,
+            )?;
+        } else {
+            return Err(CliError::new(
+                EXIT_MALFORMED,
+                format!("unsupported filesystem entry: {}", path.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn push_entry(
+    entries: &mut Vec<ArtifactEntry>,
+    entry: ArtifactEntry,
+    limits: &SecurityLimits,
+) -> Result<(), CliError> {
+    let next = entries
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| CliError::new(EXIT_GENERIC, "artifact entry count overflow"))?;
+    let next = u32::try_from(next)
+        .map_err(|_| CliError::new(EXIT_GENERIC, "artifact entry count overflow"))?;
+    if next > limits.max_file_count {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            format!(
+                "artifact has more than {} filesystem entries",
+                limits.max_file_count
+            ),
+        ));
+    }
+    entries.push(entry);
+    Ok(())
+}
+
+fn portable_relative(
+    root: &Path,
+    path: &Path,
+    limits: &SecurityLimits,
+) -> Result<RelativeArtifactPath, CliError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| CliError::new(EXIT_MALFORMED, "artifact path escaped its source root"))?;
+    let text = relative.to_str().ok_or_else(|| {
+        CliError::new(
+            EXIT_MALFORMED,
+            format!("artifact path is not UTF-8: {}", path.display()),
+        )
+    })?;
+    let portable = text.replace(std::path::MAIN_SEPARATOR, "/");
+    RelativeArtifactPath::with_max_bytes(&portable, limits.max_path_bytes)
+        .map_err(|error| CliError::new(EXIT_MALFORMED, format!("invalid artifact path: {error}")))
+}
+
+fn selected_name(command: &EncodeCommand) -> Result<Option<String>, CliError> {
+    if let Some(name) = &command.name {
+        return Ok(Some(name.clone()));
+    }
+    if !command.include_name {
+        return Ok(None);
+    }
+    if command.input.as_os_str() == "-" {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "--include-name with stdin requires --name",
+        ));
+    }
+    command
+        .input
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| Some(value.to_string()))
+        .ok_or_else(|| {
+            CliError::new(
+                EXIT_MALFORMED,
+                "artifact source basename is absent or not UTF-8",
+            )
+        })
+}
+
+fn read_input(command: &DecodeCommand) -> Result<SimpleInput, CliError> {
+    let bytes = if let Some(path) = &command.token_file {
+        let maximum = SecurityLimits::SIMPLE_ARTIFACT
+            .max_token_bytes
+            .max(SecurityLimits::SIMPLE_ARTIFACT.max_capsule_bytes);
+        read_bounded_nofollow(path, maximum).map_err(|error| {
+            CliError::new(EXIT_GENERIC, format!("cannot read artifact: {error}"))
+        })?
     } else {
         let token = command
             .token
             .as_deref()
             .ok_or_else(|| CliError::new(EXIT_MALFORMED, "TOKEN or --file is required"))?;
         if token == "-" {
-            let bytes = read_bounded(io::stdin().lock(), SecurityLimits::V1.max_token_bytes)?;
-            String::from_utf8(bytes)
-                .map_err(|_| CliError::new(EXIT_MALFORMED, "file token is not UTF-8"))?
+            read_bounded(
+                io::stdin().lock(),
+                SecurityLimits::SIMPLE_ARTIFACT.max_token_bytes,
+            )?
         } else {
-            token.to_string()
+            token.as_bytes().to_vec()
         }
     };
-    Ok(value
+    if bytes.starts_with(BINARY_MAGIC) {
+        return Ok(SimpleInput::ArtifactBinary(bytes));
+    }
+    let value = String::from_utf8(bytes)
+        .map_err(|_| CliError::new(EXIT_MALFORMED, "artifact token is not UTF-8"))?;
+    let token = value
         .trim_matches(|character: char| character.is_ascii_whitespace())
-        .to_string())
+        .to_string();
+    if token.starts_with("rf1_") {
+        Ok(SimpleInput::LegacyToken(token))
+    } else if token.starts_with(ARTIFACT_TOKEN_PREFIX) {
+        Ok(SimpleInput::ArtifactToken(token))
+    } else {
+        Err(CliError::new(
+            EXIT_MALFORMED,
+            "input is not an ra1_, rf1_ or binary .rba artifact",
+        ))
+    }
+}
+
+fn resolve_target(
+    command: &DecodeCommand,
+    artifact: &Artifact,
+) -> Result<Option<PathBuf>, CliError> {
+    if let Some(output) = &command.output {
+        create_parent(output)?;
+        return Ok(Some(output.clone()));
+    }
+    if !command.accept_suggested_path {
+        return Ok(None);
+    }
+    let mut relative = artifact.suggested_path().map_or_else(
+        || {
+            artifact
+                .suggested_name()
+                .map_or_else(PathBuf::new, PathBuf::from)
+        },
+        |path| portable_path(path.as_str()),
+    );
+    if let Some(name) = &command.name {
+        validate_override_name(name)?;
+        if relative.as_os_str().is_empty() {
+            relative.push(name);
+        } else {
+            relative.set_file_name(name);
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "artifact has no suggested destination; pass --output or --name",
+        ));
+    }
+    prepare_confined_target(&command.root, &relative).map(Some)
+}
+
+fn validate_override_name(value: &str) -> Result<(), CliError> {
+    if value.contains('/') || value.contains('\\') {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "destination name must be one portable component",
+        ));
+    }
+    RelativeArtifactPath::new(value)
+        .map(|_| ())
+        .map_err(|error| {
+            CliError::new(EXIT_MALFORMED, format!("invalid destination name: {error}"))
+        })
+}
+
+fn prepare_confined_target(root: &Path, relative: &Path) -> Result<PathBuf, CliError> {
+    fs::create_dir_all(root).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!("cannot create artifact root {}: {error}", root.display()),
+        )
+    })?;
+    let metadata = fs::symlink_metadata(root).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!("cannot inspect artifact root {}: {error}", root.display()),
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "artifact root must be a real directory, not a symbolic link",
+        ));
+    }
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!("cannot resolve artifact root: {error}"),
+        )
+    })?;
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let mut current = canonical_root.clone();
+    for component in parent.components() {
+        let std::path::Component::Normal(value) = component else {
+            return Err(CliError::new(
+                EXIT_MALFORMED,
+                "suggested destination contains an unsafe component",
+            ));
+        };
+        current.push(value);
+        match fs::symlink_metadata(&current) {
+            Ok(item) if item.file_type().is_symlink() || !item.is_dir() => {
+                return Err(CliError::new(
+                    EXIT_MALFORMED,
+                    format!(
+                        "suggested destination crosses a non-directory or symlink: {}",
+                        current.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(|create_error| {
+                    CliError::new(
+                        EXIT_GENERIC,
+                        format!("cannot create {}: {create_error}", current.display()),
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(CliError::new(
+                    EXIT_GENERIC,
+                    format!("cannot inspect {}: {error}", current.display()),
+                ));
+            }
+        }
+    }
+    Ok(canonical_root.join(relative))
+}
+
+fn portable_path(value: &str) -> PathBuf {
+    value.split('/').collect()
+}
+
+fn restore(artifact: &Artifact, target: &Path) -> Result<(), CliError> {
+    if target.exists() {
+        return Err(CliError::new(
+            EXIT_GENERIC,
+            format!("output already exists: {}", target.display()),
+        ));
+    }
+    match artifact.kind() {
+        ArtifactKind::File => restore_file(artifact, target),
+        ArtifactKind::Directory => restore_directory(artifact, target),
+    }
+}
+
+fn restore_file(artifact: &Artifact, target: &Path) -> Result<(), CliError> {
+    let entry = artifact
+        .entries()
+        .first()
+        .filter(|entry| entry.kind() == ArtifactEntryKind::File)
+        .ok_or_else(|| CliError::new(EXIT_MALFORMED, "verified file artifact has no file"))?;
+    create_parent(target)?;
+    let parent = target
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".rebyte-artifact-")
+        .tempfile_in(parent)
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot stage artifact: {error}")))?;
+    temporary.write_all(entry.bytes()).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!("cannot write staged artifact: {error}"),
+        )
+    })?;
+    temporary.as_file().sync_all().map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!("cannot sync staged artifact: {error}"),
+        )
+    })?;
+    set_executable(temporary.path(), entry.executable())?;
+    temporary.persist_noclobber(target).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!("cannot commit reconstructed file: {}", error.error),
+        )
+    })?;
+    sync_parent(target)
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot sync output: {error}")))
+}
+
+fn restore_directory(artifact: &Artifact, target: &Path) -> Result<(), CliError> {
+    create_parent(target)?;
+    let parent = target
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staging = tempfile::Builder::new()
+        .prefix(".rebyte-artifact-")
+        .tempdir_in(parent)
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot stage directory: {error}")))?;
+    for entry in artifact.entries() {
+        let relative = entry
+            .path()
+            .ok_or_else(|| CliError::new(EXIT_MALFORMED, "directory entry has no path"))?;
+        let destination = staging.path().join(portable_path(relative.as_str()));
+        match entry.kind() {
+            ArtifactEntryKind::Directory => {
+                fs::create_dir_all(&destination).map_err(|error| {
+                    CliError::new(
+                        EXIT_GENERIC,
+                        format!("cannot stage directory {}: {error}", relative.as_str()),
+                    )
+                })?;
+            }
+            ArtifactEntryKind::File => {
+                create_parent(&destination)?;
+                write_new(&destination, entry.bytes(), false).map_err(|error| {
+                    CliError::new(
+                        EXIT_GENERIC,
+                        format!("cannot stage file {}: {error}", relative.as_str()),
+                    )
+                })?;
+                set_executable(&destination, entry.executable())?;
+            }
+        }
+    }
+    let staging_path = staging.keep();
+    if let Err(error) = fs::rename(&staging_path, target) {
+        let _cleanup = fs::remove_dir_all(&staging_path);
+        return Err(CliError::new(
+            EXIT_GENERIC,
+            format!("cannot commit reconstructed directory: {error}"),
+        ));
+    }
+    sync_parent(target)
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot sync output: {error}")))
+}
+
+fn create_parent(path: &Path) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!(
+                "cannot create output directory {}: {error}",
+                parent.display()
+            ),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path, executable: bool) -> Result<(), CliError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot read permissions: {error}")))?
+        .permissions();
+    let current = permissions.mode();
+    let desired = if executable {
+        current | 0o111
+    } else {
+        current & !0o111
+    };
+    permissions.set_mode(desired);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot set permissions: {error}")))
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path, _executable: bool) -> Result<(), CliError> {
+    Ok(())
 }
 
 fn read_bounded(mut reader: impl io::Read, maximum: u64) -> Result<Vec<u8>, CliError> {
@@ -241,11 +808,26 @@ fn read_bounded(mut reader: impl io::Read, maximum: u64) -> Result<Vec<u8>, CliE
     Ok(bytes)
 }
 
-fn encode_error(error: FileTokenError) -> CliError {
+fn artifact_encode_error(error: ArtifactTokenError) -> CliError {
     CliError::new(EXIT_GENERIC, error.to_string())
 }
 
-fn decode_error(error: FileTokenError) -> CliError {
+fn artifact_decode_error(error: ArtifactTokenError) -> CliError {
+    let exit_code = if matches!(
+        error,
+        ArtifactTokenError::EnvelopeDigestMismatch
+            | ArtifactTokenError::ContentDigestMismatch
+            | ArtifactTokenError::FileDigestMismatch
+            | ArtifactTokenError::Compression(_)
+    ) {
+        EXIT_DIGEST
+    } else {
+        EXIT_MALFORMED
+    };
+    CliError::new(exit_code, error.to_string())
+}
+
+fn legacy_decode_error(error: FileTokenError) -> CliError {
     let exit_code = if matches!(
         error,
         FileTokenError::DigestMismatch | FileTokenError::Compression(_)
@@ -257,6 +839,13 @@ fn decode_error(error: FileTokenError) -> CliError {
     CliError::new(exit_code, error.to_string())
 }
 
+const fn artifact_kind_name(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::File => "file",
+        ArtifactKind::Directory => "directory",
+    }
+}
+
 const fn compression_name(compression: CompressionAlgorithm) -> &'static str {
     match compression {
         CompressionAlgorithm::None => "none",
@@ -264,24 +853,94 @@ const fn compression_name(compression: CompressionAlgorithm) -> &'static str {
     }
 }
 
+fn print_encode_report(report: &EncodeReport<'_>) {
+    println!(
+        "{}",
+        super::ui::success("✓ Unsigned artifact encoded and self-verified")
+    );
+    println!("  Type        {}", report.artifact_kind);
+    println!("  Entries     {}", report.entries);
+    println!("  Input       {} bytes", report.original_bytes);
+    println!("  Stored      {} bytes", report.stored_bytes);
+    println!("  Format      {}", report.representation);
+    println!("  Content ID  {}", report.content_digest);
+    if let Some(output) = &report.output {
+        println!("  Output      {output}");
+    }
+    println!("  Authenticity unsigned · integrity only");
+}
+
+fn print_decode_report(report: &DecodeReport<'_>) {
+    println!(
+        "{}",
+        super::ui::success("✓ Unsigned artifact fully verified")
+    );
+    println!("  Type        {}", report.artifact_kind);
+    println!("  Entries     {}", report.entries);
+    println!("  Bytes       {}", report.reconstructed_bytes);
+    println!("  Compression {}", report.compression);
+    println!("  Content ID  {}", report.content_digest);
+    if let Some(name) = report.suggested_name {
+        println!("  Name hint   {name}");
+    }
+    if let Some(path) = report.suggested_path {
+        println!("  Path hint   {path}");
+    }
+    if let Some(output) = &report.output {
+        println!("  Output      {output}");
+    } else {
+        println!("  No files written");
+        println!("  Pass --output, or explicitly use --accept-suggested-path.");
+    }
+    println!("  Authenticity unsigned · integrity only");
+}
+
+enum SimpleInput {
+    LegacyToken(String),
+    ArtifactToken(String),
+    ArtifactBinary(Vec<u8>),
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EncodeReport<'a> {
     schema_version: u16,
     kind: &'static str,
+    artifact_kind: &'static str,
     authenticated: bool,
-    digest: String,
+    content_digest: String,
+    envelope_digest: String,
+    entries: u32,
     original_bytes: u64,
     stored_bytes: u64,
-    token_bytes: u64,
-    compression: &'static str,
+    representation: &'static str,
     output: Option<String>,
     token: Option<&'a str>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DecodeReport {
+struct DecodeReport<'a> {
+    schema_version: u16,
+    kind: &'static str,
+    artifact_kind: &'static str,
+    authenticated: bool,
+    integrity_verified: bool,
+    content_digest: String,
+    envelope_digest: String,
+    entries: u32,
+    reconstructed_bytes: u64,
+    stored_bytes: u64,
+    compression: &'static str,
+    suggested_name: Option<&'a str>,
+    suggested_path: Option<&'a str>,
+    output: Option<String>,
+    written: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyDecodeReport {
     schema_version: u16,
     kind: &'static str,
     authenticated: bool,
