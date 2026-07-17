@@ -13,12 +13,12 @@ keywords = ["artifact", "capsule", "security"]
 categories = ["filesystem", "encoding"]
 
 [dependencies]
-rebyte-apply = { path = "../rebyte-apply", version = "0.1.0" }
-rebyte-diff = { path = "../rebyte-diff", version = "0.1.0" }
-rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
-rebyte-pack = { path = "../rebyte-pack", version = "0.1.0" }
-rebyte-signature = { path = "../rebyte-signature", version = "0.1.0" }
-rebyte-verify = { path = "../rebyte-verify", version = "0.1.0" }
+rebyte-apply = { path = "../rebyte-apply", version = "1.0.0" }
+rebyte-diff = { path = "../rebyte-diff", version = "1.0.0" }
+rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
+rebyte-pack = { path = "../rebyte-pack", version = "1.0.0" }
+rebyte-signature = { path = "../rebyte-signature", version = "1.0.0" }
+rebyte-verify = { path = "../rebyte-verify", version = "1.0.0" }
 
 [lints]
 workspace = true

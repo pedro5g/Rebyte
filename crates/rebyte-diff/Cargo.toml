@@ -12,8 +12,8 @@ publish = false
 
 [dependencies]
 cap-std.workspace = true
-rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
-rebyte-verify = { path = "../rebyte-verify", version = "0.1.0" }
+rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
+rebyte-verify = { path = "../rebyte-verify", version = "1.0.0" }
 similar.workspace = true
 
 [lints]

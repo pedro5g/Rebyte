@@ -11,10 +11,10 @@ homepage.workspace = true
 publish = false
 
 [dependencies]
-rebyte-codec = { path = "../rebyte-codec", version = "0.1.0" }
-rebyte-compression = { path = "../rebyte-compression", version = "0.1.0" }
-rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
-rebyte-integrity = { path = "../rebyte-integrity", version = "0.1.0" }
+rebyte-codec = { path = "../rebyte-codec", version = "1.0.0" }
+rebyte-compression = { path = "../rebyte-compression", version = "1.0.0" }
+rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
+rebyte-integrity = { path = "../rebyte-integrity", version = "1.0.0" }
 
 [lints]
 workspace = true

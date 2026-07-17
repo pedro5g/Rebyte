@@ -1,125 +1,283 @@
 # Rebyte
 
-Rebyte Artifact Protocol (RAP) reconstructs exact file artifacts from bounded,
-signed and self-contained capsules. It performs no network access, command
-execution, lifecycle hooks or generated-code interpretation.
+[![CI](https://github.com/pedro5g/Rebyte/actions/workflows/ci.yml/badge.svg)](https://github.com/pedro5g/Rebyte/actions/workflows/ci.yml)
+[![Security audit](https://github.com/pedro5g/Rebyte/actions/workflows/scheduled.yml/badge.svg)](https://github.com/pedro5g/Rebyte/actions/workflows/scheduled.yml)
+[![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> Rebyte v0.1.0 is pre-release software. RAP v1 is specified, but no production
-> publisher key ships with the CLI yet. Use the current development key only for
-> local evaluation with explicit `--trust-channel development`.
+Rebyte is an offline artifact delivery tool. It packages a directory into a
+deterministic RAP v1 capsule, authenticates the capsule with Ed25519 and
+reconstructs every file only after bounded parsing, trust-policy verification,
+decompression and byte-level integrity checks.
 
-## What it guarantees
+Rebyte 1.0 provides a stable CLI and Rust API. It performs no network access,
+command execution, lifecycle hooks or generated-code interpretation.
 
-- byte-for-byte reconstruction verified with domain-separated BLAKE3;
-- Ed25519 publisher authentication under a caller-controlled keyring;
-- fixed, canonical RAP v1 encoding with bounded parsing and decompression;
-- portable relative paths, capability-confined filesystem access and symlink
-  rejection;
-- atomic replacement per file plus a durable multi-file recovery journal;
-- deterministic native packing and an unsigned, filesystem-free browser API.
+## Why Rebyte
 
-RAP does not encrypt content, delete files, preserve ownership/ACL/xattrs/
-timestamps, or promise global atomicity across multiple files. Read the
-[protocol](schemas/rap-v1.md), [threat model](docs/threat-model.md) and
-[security model](docs/security-model.md) before production integration.
+- exact byte-for-byte reconstruction with domain-separated BLAKE3 digests;
+- canonical binary encoding independent of `serde` or a language runtime;
+- explicit publisher trust using production, staging and development channels;
+- encrypted offline signing keys and distributable public trust documents;
+- portable paths, bounded decompression and strict rejection of symlinks;
+- dry-run diffs, per-file atomic replacement and recoverable transactions;
+- Linux, macOS, Windows and browser-safe structural WebAssembly APIs.
 
-## Installation
+RAP does not encrypt capsule contents, delete files, preserve ownership, ACLs,
+xattrs or timestamps, and does not promise one globally atomic switch for a
+multi-file update. Read the [protocol](schemas/rap-v1.md),
+[threat model](docs/threat-model.md) and
+[security model](docs/security-model.md) before deployment.
 
-Until the first release is published, build the CLI from a trusted checkout:
+## Quick start
+
+Build the CLI with Rust 1.97.1 or install a verified release archive:
 
 ```console
 git clone https://github.com/pedro5g/Rebyte.git
 cd Rebyte
 cargo install --locked --path crates/rebyte-cli
+rebyte --version
 rebyte doctor
 ```
 
-Tagged releases are configured to publish `rebyte` archives for Linux x64
-glibc/musl, Linux ARM64 glibc, macOS Intel/Apple Silicon and Windows x64. Each
-archive receives a SHA-256 file; releases also carry a `CycloneDX` SBOM,
-embedded auditable dependency metadata and `GitHub` artifact attestations. Verify a
-download before execution:
+Prepare a passphrase file outside the artifact tree. Interactive use may omit
+`--passphrase-file`; Rebyte will prompt twice without echoing the passphrase.
 
 ```console
-sha256sum -c rebyte-cli-x86_64-unknown-linux-gnu.tar.xz.sha256
-gh attestation verify rebyte-cli-x86_64-unknown-linux-gnu.tar.xz \
-  --repo pedro5g/Rebyte
+umask 077
+printf '%s\n' 'replace-with-a-long-random-passphrase' > publisher.passphrase
+
+rebyte key generate \
+  --name "Example production publisher" \
+  --private-key publisher.private.json \
+  --public-key publisher.public.json \
+  --passphrase-file publisher.passphrase
 ```
 
-## CLI
+Keep `publisher.private.json` and the passphrase separate and offline. The
+public document is the only key file copied to verifier machines.
 
-Every capsule command accepts an `rb1_` token, `-` for a token on stdin, or
-`--file release.rbc` for the binary envelope.
+Create and verify a signed capsule:
 
 ```console
-rebyte inspect --file release.rbc
-rebyte verify --file release.rbc
-rebyte diff --file release.rbc --root ./app
-rebyte apply --file release.rbc --root ./app --dry-run
-rebyte apply --file release.rbc --root ./app
+rebyte pack \
+  --root ./artifact \
+  --private-key publisher.private.json \
+  --passphrase-file publisher.passphrase \
+  --output release.rbc \
+  --producer "example-build" \
+  --producer-version "1.0.0" \
+  --name "Example release"
+
+rebyte inspect --file release.rbc --trusted-key publisher.public.json
+rebyte verify --file release.rbc --trusted-key publisher.public.json
 ```
 
-`apply` verifies limits, structure, trust policy, signature, decompression and
-every file digest before showing the plan. The confirmation defaults to no.
-`--yes` bypasses only that prompt; it never weakens verification. `--dry-run`
-performs verification and diff without creating `.rebyte/`. `--backup` retains
-the committed journal and original bytes. Machine-readable commands support
-versioned `--json` output, and terminal output neutralizes control characters.
-
-The current bundled key is development-only, so evaluation commands require:
+Preview and apply it to a destination:
 
 ```console
-rebyte verify --file development.rbc --trust-channel development
+rebyte diff \
+  --file release.rbc \
+  --trusted-key publisher.public.json \
+  --root ./destination
+
+rebyte apply \
+  --file release.rbc \
+  --trusted-key publisher.public.json \
+  --root ./destination \
+  --dry-run
+
+rebyte apply \
+  --file release.rbc \
+  --trusted-key publisher.public.json \
+  --root ./destination
 ```
 
-### Recovery
+`apply` defaults to an interactive “no”. `--yes` skips only the prompt and
+never weakens verification. `--backup` retains verified original bytes and the
+journal for a later explicit rollback.
 
-Transactions live below `<root>/.rebyte/transactions/`. A crash may expose a
-prefix of a multi-file change, but the persisted journal, staged bytes,
-precondition digests and backups allow explicit recovery:
+## CLI overview
+
+Run `rebyte -h`, `rebyte help COMMAND` or `rebyte COMMAND -h` for contextual
+help. `rebyte --version` prints the exact binary version. Help and human output
+use terminal-aware color; redirected output and `NO_COLOR` remain plain.
+
+| Command | Purpose |
+|---|---|
+| `key generate` | Create a random encrypted private key and public trust document |
+| `key inspect` | Validate and display a public key, fingerprint, channel and status |
+| `key status` | Produce an active, retired or revoked public trust document |
+| `pack` | Read a directory without following symlinks, sign and self-verify a capsule |
+| `hash` | Compute or check the RAP file-domain BLAKE3 digest |
+| `inspect` | Parse bounded metadata; unverified data is labelled as such |
+| `verify` | Verify encoding, publisher, signature, payload and every file |
+| `diff` | Compare a verified capsule with a root without writing |
+| `apply` | Verify, preview and execute a recoverable transaction |
+| `transactions` | List retained or interrupted transactions |
+| `resume` / `rollback` | Recover an interrupted transaction explicitly |
+| `doctor` | Report version, platform, trust keys and apply capability |
+| `completions` | Generate Bash, Zsh, Fish, Elvish or `PowerShell` completions |
+
+The full syntax, JSON schemas, stdin behavior and exit-code contract are in
+[the CLI reference](docs/cli.md). Practical deployment patterns are collected
+in [use cases](docs/use-cases.md).
+
+### Input and trust
+
+Capsule consumers accept a positional `rb1_` token, `-` for a token on stdin,
+or `--file release.rbc` for the binary envelope. Public trust is always local
+and explicit:
 
 ```console
-rebyte transactions --root ./app
-rebyte resume TRANSACTION_ID --root ./app
-rebyte rollback TRANSACTION_ID --root ./app
+rebyte verify TOKEN --trusted-key publisher.public.json
+printf '%s\n' "$REBYTE_TOKEN" | rebyte verify - --trusted-key publisher.public.json
+rebyte verify --file release.rbc \
+  --trusted-key current.public.json \
+  --trusted-key next.public.json
 ```
 
-`resume` re-hashes staged data and rechecks target preconditions. `rollback`
-restores verified backups and removes files created by the transaction. A new
-apply is rejected while an unfinished transaction exists. If either command
-reports a conflict, preserve `.rebyte/` and investigate local concurrent
-changes before retrying.
+Production is the default trust channel. Staging and development require
+explicit opt-in:
 
-### Exit codes
+```console
+rebyte verify --file staging.rbc \
+  --trusted-key staging.public.json \
+  --trust-channel staging
+```
 
-| Code | Meaning |
-|---:|---|
-| 0 | success or user cancellation before writes |
-| 1 | generic CLI/input-output error |
-| 2 | malformed or oversized input |
-| 3 | invalid Ed25519 signature |
-| 4 | unknown publisher key |
-| 5 | digest, payload or decompression failure |
-| 6 | unsupported RAP version |
-| 7 | trust-policy rejection |
-| 8 | unsafe path, symlink or non-file target |
-| 9 | target or transaction conflict |
-| 10 | journal, recovery or filesystem transaction failure |
+The bundled development fixture exists only for tests and local evaluation;
+it is rejected unless `--trust-channel development` is present.
+
+## Keys and signing
+
+`key generate` obtains a 32-byte Ed25519 seed from the operating-system random
+source. The private document encrypts that seed with XChaCha20-Poly1305 using a
+key derived by Argon2id (64 `MiB`, three iterations, one lane). Public identity,
+salt and nonce are authenticated as associated data. JSON parsers reject
+unknown fields, non-canonical Base64URL and identity mismatches.
+
+On Unix, Rebyte creates private and passphrase-bearing outputs with mode `0600`
+and refuses to load secret files accessible by group or other users. Windows
+uses inherited ACLs; restrict them explicitly for a dedicated publisher
+account. The detailed offline ceremony, backup strategy, Windows ACL example,
+rotation and emergency revocation process are in
+[key management](docs/key-management.md).
+
+Never:
+
+- commit a private key, passphrase or generated capsule containing secrets;
+- put the private key inside the directory passed to `rebyte pack`;
+- store the private key and passphrase in the same backup or secret;
+- use command-line arguments or ordinary environment variables for a
+  production passphrase;
+- distribute a new public key without comparing its Key ID out of band.
+
+For high-value online signing, implement the `rebyte_signature::Signer` trait
+against a reviewed KMS or HSM. The encrypted local signer is intended for an
+offline release workstation or a tightly controlled build environment; Rebyte
+does not pretend a JSON file is a hardware trust boundary.
+
+### Rotation and revocation
+
+Deploy the next active public key to all verifiers before signing with it. RAP
+v1 has no trusted timestamp, so `retired` and `revoked` both reject every
+capsule signed by that key; `revoked` communicates compromise, while `retired`
+communicates planned removal.
+
+```console
+rebyte key status old.public.json \
+  --status retired \
+  --output old.retired.public.json
+
+rebyte key status compromised.public.json \
+  --status revoked \
+  --output compromised.revoked.public.json
+```
+
+Replace the active document in verifier configuration with the new status
+document. Do not merely remove a compromised key when operators need a clear
+“known revoked” diagnosis.
+
+## RAP file hashes
+
+`rebyte hash` is streaming and bounded to the RAP v1 single-file limit. Its
+result is a domain-separated BLAKE3 digest using context `rebyte:v1:file`; it
+is intentionally different from a generic `b3sum` of the same bytes.
+
+```console
+rebyte hash ./artifact/config.toml
+rebyte hash ./artifact/config.toml --json
+rebyte hash ./artifact/config.toml --check "$EXPECTED_RAP_DIGEST"
+printf 'exact bytes' | rebyte hash -
+```
+
+A successful `--check` exits with code 0. A mismatch exits with code 5 and
+prints both expected and computed digests without changing any file. Capsule
+root digests are shown by `pack`, `inspect` and `verify`; they cover the fixed
+header, canonical manifest and compressed payload, not the final signature.
+
+## Recovery
+
+Transactions live under `<root>/.rebyte/transactions/`. A crash can expose a
+prefix of a multi-file change, but the persisted journal, staged data,
+precondition digests and original backups permit deterministic recovery:
+
+```console
+rebyte transactions --root ./destination
+rebyte resume TRANSACTION_ID --root ./destination
+rebyte rollback TRANSACTION_ID --root ./destination
+```
+
+`resume` hashes staged data again and rechecks every target precondition.
+`rollback` restores digest-verified backups and removes files created by the
+transaction. A new apply is rejected while an unfinished transaction exists.
+If recovery reports a conflict, preserve `.rebyte/` and investigate concurrent
+changes instead of deleting the journal.
+
+Rebyte synchronizes file contents and journals before rename. Unix also
+synchronizes containing directories. Rust does not expose a portable Windows
+directory-fsync operation, so Windows uses durable file flushes plus atomic
+per-file rename and journal recovery.
+
+## JSON and automation
+
+Commands with `--json` emit a versioned object with `schemaVersion: 1` and no
+ANSI controls. Errors go to stderr and retain the documented exit code. A safe
+non-interactive deployment first verifies or performs a dry run and then uses
+`--yes`:
+
+```console
+rebyte verify --file release.rbc \
+  --trusted-key publisher.public.json --json > verification.json
+
+rebyte apply --file release.rbc \
+  --trusted-key publisher.public.json \
+  --root ./destination --dry-run --json > plan.json
+
+rebyte apply --file release.rbc \
+  --trusted-key publisher.public.json \
+  --root ./destination --yes --backup --json > apply.json
+```
+
+Do not parse human output. JSON fields are additive within Rebyte 1.x; scripts
+must ignore unknown fields and check `schemaVersion` before interpretation.
 
 ## Rust API
 
-`rebyte-core` exposes the stable facade. The important boundary is the return
-type of `verify_capsule`: only `FullyVerifiedCapsule` can reach `diff_capsule`
-or `apply_transaction`.
+`rebyte-core` is the stable consumer and producer facade. Only a
+`FullyVerifiedCapsule` can reach diff or filesystem application APIs.
 
 ```rust,no_run
 use std::path::Path;
 
-use rebyte_core::{CapsuleInput, apply_transaction, verify_capsule};
-use rebyte_core::{ApplyOptions, TrustedKeyring, VerificationPolicy};
+use rebyte_core::{
+    ApplyOptions, CapsuleInput, TrustedKeyring, VerificationPolicy,
+    apply_transaction, verify_capsule,
+};
 
 # fn example(bytes: &[u8], keyring: &TrustedKeyring) -> Result<(), Box<dyn std::error::Error>> {
-let policy = VerificationPolicy::default(); // production channel only
+let policy = VerificationPolicy::PRODUCTION;
 let verified = verify_capsule(CapsuleInput::Binary(bytes), &policy, keyring)?;
 apply_transaction(
     &verified,
@@ -130,56 +288,40 @@ apply_transaction(
 # }
 ```
 
-The verification pipeline is encoded as typestates:
+Verification is encoded as typestates:
 `Unverified → StructurallyValid → SignatureVerified → PayloadVerified →
-FullyVerified`. `KeyId` is derived from the public key; publisher display names,
-channel and active/retired/revoked state come from the local keyring.
-
-Core crates are separated by responsibility:
-
-- `rebyte-format`: `no_std + alloc` bounded values and portable paths;
-- `rebyte-codec`: manual canonical binary and `rb1_` codecs;
-- `rebyte-integrity`, `rebyte-compression`, `rebyte-signature`: cryptographic
-  and bounded stream primitives;
-- `rebyte-pack`, `rebyte-verify`: deterministic construction and typestates;
-- `rebyte-diff`, `rebyte-apply`: read-only planning and recoverable writes;
-- `rebyte-signer`: explicitly development-only signing adapters.
+FullyVerified`. The workspace separates format, codec, integrity, compression,
+signature, packing, verification, diff and apply responsibilities into crates
+with `#![forbid(unsafe_code)]`.
 
 ## WebAssembly
 
 `rebyte-wasm` exports only `pack_unsigned`, `inspect` and `verify_structure`.
-Browser packing always uses `CompressionAlgorithm::None`; a trusted server must
-reparse semantic inputs, apply native compression and sign. The Wasm dependency
-tree contains no private key, keyring, trust decision, filesystem or network
-API.
-
-Build `JavaScript` bindings with `wasm-pack`:
+Browser packing uses `CompressionAlgorithm::None`; a trusted native service
+must revalidate semantic input, compress and sign. The WebAssembly dependency
+tree contains no private key, trust decision, filesystem or network API.
 
 ```console
 wasm-pack build crates/rebyte-wasm --target web
 ```
 
-Capsule input uses `{ kind: "binary", value: number[] }` or
-`{ kind: "token", value: "rb1_..." }`. Inspection output is explicitly marked
-`trust: "unverified"`.
+## Distribution
 
-## Security and trust
+Tagged releases produce archives for Linux x64 glibc/musl, Linux ARM64 glibc,
+macOS Intel/Apple Silicon and Windows x64. Release assets include SHA-256
+checksums, a `CycloneDX` SBOM, auditable dependency metadata and `GitHub` artifact
+attestations.
 
-Production callers must provision their own `TrustedKeyring`. Production is
-the default channel; staging and development are opt-in; retired, revoked and
-unknown keys are rejected. RAP v1 has no timestamp or expiry field, so key
-rotation/revocation is a local deployment responsibility.
+```console
+sha256sum -c rebyte-cli-x86_64-unknown-linux-gnu.tar.xz.sha256
+gh attestation verify rebyte-cli-x86_64-unknown-linux-gnu.tar.xz \
+  --repo pedro5g/Rebyte
+```
 
-`rebyte-signer` contains no private-key fixture. `DevelopmentSigner` requires
-an explicit 32-byte seed, and `EnvironmentDevelopmentSigner` accepts unpadded
-Base64URL while zeroizing copied buffers. Neither is a production KMS/HSM
-adapter. Never put a production key in a capsule builder, browser bundle,
-repository or ordinary process environment.
+Follow the complete [release verification procedure](docs/release.md) before
+production installation.
 
-Report vulnerabilities according to [SECURITY.md](SECURITY.md). Error messages
-do not include capsule content, tokens or secrets.
-
-## Development and quality
+## Development
 
 The workspace uses Rust 1.97.1, Edition 2024 and resolver 3.
 
@@ -187,56 +329,26 @@ The workspace uses Rust 1.97.1, Edition 2024 and resolver 3.
 cargo xtask check
 cargo xtask test
 cargo check -p rebyte-wasm --target wasm32-unknown-unknown
-```
-
-`check` enforces rustfmt, all-target Cargo check, strict Clippy and rustdoc with
-warnings denied. Tests include unit, integration and property suites. Scheduled
-CI runs RustSec/source/license checks, Miri, bounded fuzzing and mutation
-sampling. Fuzz harnesses are in `fuzz/` and can be compiled or run with:
-
-```console
 cargo check --manifest-path fuzz/Cargo.toml --bins
-cargo +nightly fuzz run decode_capsule
+cargo xtask security
 ```
 
-Coverage and performance targets, including the measured initial baseline, are
-tracked transparently in [docs/quality.md](docs/quality.md). Scheduled CI
-publishes both LCOV and Criterion artifacts for regression review.
+CI runs Linux, Linux ARM64, macOS Intel/ARM, Windows x64 and WebAssembly jobs.
+Scheduled workflows add Miri, fuzzing, mutation sampling, coverage and
+benchmarks. Current measured targets and baselines are documented in
+[quality](docs/quality.md).
 
-Internal AI-assisted notes, prompts and artifacts belong only in the ignored
-`.ai/` directory. See [CONTRIBUTING.md](CONTRIBUTING.md) for commit and review
-rules and [docs/release.md](docs/release.md) for the release procedure.
+Internal AI-assisted notes and prompts belong only in the ignored `.ai/`
+directory. See [CONTRIBUTING.md](CONTRIBUTING.md) for review and Conventional
+Commit rules.
 
-## Platforms and limitations
+## Security
 
-| Platform | CI | Release artifact |
-|---|---|---|
-| Linux x64 glibc | full quality gate | yes |
-| Linux x64 musl | release build | yes |
-| Linux ARM64 glibc | tests + release build | yes |
-| macOS Intel | tests + release build | yes |
-| macOS Apple Silicon | tests + release build | yes |
-| Windows x64 | tests + release build | yes |
-| `wasm32-unknown-unknown` | structural/pack build | Wasm package, no filesystem |
-
-Filesystem behavior differs by platform. Rebyte promises atomic replacement
-per file when the temporary and target are on the same filesystem; it does not
-promise a globally atomic multi-file switch.
-
-## Troubleshooting
-
-- `unknown publisher key`: install the expected public key in the host keyring;
-  the standalone CLI currently has no production key.
-- `trust policy rejected publisher`: explicitly allow staging/development only
-  when that environment is intended.
-- `incomplete Rebyte transaction`: run `rebyte transactions`, then choose
-  `resume` or `rollback`; do not delete the journal blindly.
-- `target changed during the transaction`: another process or user modified a
-  precondition; inspect the target and retained transaction before recovery.
-- `symbolic links are forbidden`: choose a real directory tree below `--root`;
-  Rebyte never follows symlinks in target paths.
-- `invalid or truncated compression stream`: reacquire the capsule from a
-  trusted channel and compare its published checksum.
+No software is “100% secure”. Rebyte 1.0 provides a stable, fail-closed design
+and adversarial tests, but has not claimed an independent security audit.
+Report suspected vulnerabilities privately according to
+[SECURITY.md](SECURITY.md); never attach production keys or secret material to
+a public issue.
 
 ## License
 

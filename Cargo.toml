@@ -45,7 +45,7 @@ getrandom = "0.4"
 rpassword = "7.5"
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.97"
 authors = ["Pedro Martins (pedro5g)"]

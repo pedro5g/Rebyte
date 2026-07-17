@@ -2,8 +2,14 @@
 
 ## Supported versions
 
-Rebyte has not released a production version yet. Security fixes currently
-target the latest commit on `main`.
+| Version | Supported |
+|---|---:|
+| 1.x | yes |
+| 0.x | no |
+
+Security fixes target the latest 1.x release and `main`. RAP v1 compatibility
+is maintained across Rebyte 1.x unless accepting existing data would preserve
+a vulnerability.
 
 ## Reporting a vulnerability
 
@@ -15,8 +21,17 @@ impact, platform and Rebyte version or commit. Maintainers will acknowledge a
 complete report, coordinate remediation and credit, and publish an advisory
 after a fix is available.
 
-The project does not claim to be bug-free or suitable as a security boundary
-without independent review.
+The project does not claim to be bug-free or independently audited. High-value
+deployments should review the protocol, signing integration and local
+filesystem assumptions in their own threat model.
+
+## Key compromise
+
+For suspected publisher-key compromise, stop signing immediately, deploy a
+`revoked` public trust document, replace the key from a clean offline system
+and rebuild affected capsules. Follow [publisher key
+management](docs/key-management.md); never send a private document or
+passphrase in a vulnerability report.
 
 ## Release verification
 

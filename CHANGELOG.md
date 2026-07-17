@@ -5,6 +5,8 @@ and releases follow Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-16
+
 ### Added
 
 - Initial RAP v1 specification, threat model and security model.
@@ -24,3 +26,13 @@ and releases follow Semantic Versioning.
 - Restricted deterministic and environment-backed development signing adapters.
 - Cross-platform dist releases with checksums, SBOMs, attestations and complete usage documentation.
 - Published LCOV and Criterion quality baselines for coverage and performance regression review.
+- Encrypted Argon2id/XChaCha20-Poly1305 local publisher-key documents.
+- Production `key`, `pack` and domain-separated `hash` CLI workflows.
+- External public trust documents, key rotation and explicit revocation status.
+- Stable terminal help, version output, styled human reports and end-to-end CLI tests.
+- Professional CLI, key-management and deployment use-case documentation.
+
+### Fixed
+
+- Avoid unsupported directory `sync_all` on Windows, which caused apply tests
+  and transactions to fail with `PermissionDenied`.

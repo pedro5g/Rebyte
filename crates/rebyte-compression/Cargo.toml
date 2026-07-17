@@ -11,7 +11,7 @@ homepage.workspace = true
 publish = false
 
 [dependencies]
-rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 zstd.workspace = true

@@ -12,7 +12,7 @@ publish = false
 
 [dependencies]
 blake3.workspace = true
-rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
 subtle.workspace = true
 
 [lints]

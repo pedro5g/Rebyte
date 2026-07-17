@@ -16,9 +16,9 @@ base64.workspace = true
 chacha20poly1305.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
-rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
-rebyte-integrity = { path = "../rebyte-integrity", version = "0.1.0" }
-rebyte-signature = { path = "../rebyte-signature", version = "0.1.0" }
+rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
+rebyte-integrity = { path = "../rebyte-integrity", version = "1.0.0" }
+rebyte-signature = { path = "../rebyte-signature", version = "1.0.0" }
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true

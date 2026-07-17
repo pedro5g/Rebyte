@@ -2,7 +2,7 @@
 
 Copyright (c) 2026 Pedro Martins (pedro5g)
 
-Status: normative, pre-release.
+Status: normative and stable for Rebyte 1.x.
 
 ## Primitive encoding
 

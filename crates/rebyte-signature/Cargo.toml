@@ -12,8 +12,8 @@ publish = false
 
 [dependencies]
 ed25519-dalek.workspace = true
-rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
-rebyte-integrity = { path = "../rebyte-integrity", version = "0.1.0" }
+rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
+rebyte-integrity = { path = "../rebyte-integrity", version = "1.0.0" }
 
 [lints]
 workspace = true
