@@ -812,12 +812,21 @@ fn persist_journal(transaction: &Dir, journal: &Journal) -> Result<(), ApplyErro
     sync_directory(transaction)
 }
 
+#[cfg(unix)]
 fn sync_directory(directory: &Dir) -> Result<(), ApplyError> {
     directory
         .open(".")
         .map_err(|error| ApplyError::Io(error.kind()))?
         .sync_all()
         .map_err(|error| ApplyError::Io(error.kind()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Dir) -> Result<(), ApplyError> {
+    // Windows does not expose a portable Rust operation for fsyncing an open
+    // directory. File contents and the journal are still synced before every
+    // rename; attempting `open(".").sync_all()` fails with PermissionDenied.
+    Ok(())
 }
 
 fn load_journal(transaction: &Dir) -> Result<Journal, ApplyError> {
