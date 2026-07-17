@@ -460,7 +460,10 @@ fn doctor(command: &DoctorCommand) -> Result<(), CliError> {
             report.operating_system, report.architecture
         );
         println!("Production keys: {}", report.production_keys);
-        println!("Staging keys: {} (explicit opt-in required)", report.staging_keys);
+        println!(
+            "Staging keys: {} (explicit opt-in required)",
+            report.staging_keys
+        );
         println!(
             "Development keys: {} (explicit opt-in required)",
             report.development_keys

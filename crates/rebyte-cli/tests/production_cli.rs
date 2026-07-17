@@ -5,7 +5,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use tempfile::tempdir;
 
@@ -75,6 +75,19 @@ fn publisher_workflow_generates_packs_verifies_hashes_and_applies()
     assert_success(&packed);
     assert!(stdout_text(&packed).contains("\"files\": 2"));
 
+    let inspected = rebyte()
+        .args([
+            "inspect",
+            "--file",
+            path_text(&capsule)?,
+            "--trusted-key",
+            path_text(&public_key)?,
+            "--json",
+        ])
+        .output()?;
+    assert_success(&inspected);
+    assert!(stdout_text(&inspected).contains("\"verification\": \"valid\""));
+
     let verified = rebyte()
         .args([
             "verify",
@@ -87,6 +100,27 @@ fn publisher_workflow_generates_packs_verifies_hashes_and_applies()
         .output()?;
     assert_success(&verified);
     assert!(stdout_text(&verified).contains("\"valid\": true"));
+
+    let difference = rebyte()
+        .args([
+            "diff",
+            "--file",
+            path_text(&capsule)?,
+            "--trusted-key",
+            path_text(&public_key)?,
+            "--root",
+            path_text(&target)?,
+            "--json",
+        ])
+        .output()?;
+    assert_success(&difference);
+    assert!(stdout_text(&difference).contains("\"created\": 2"));
+
+    let doctor = rebyte()
+        .args(["doctor", "--trusted-key", path_text(&public_key)?, "--json"])
+        .output()?;
+    assert_success(&doctor);
+    assert!(stdout_text(&doctor).contains("\"productionKeys\": 1"));
 
     let applied = rebyte()
         .args([
@@ -107,6 +141,11 @@ fn publisher_workflow_generates_packs_verifies_hashes_and_applies()
         b"production artifact\n"
     );
     assert_eq!(fs::read(target.join("bin/data.bin"))?, [0_u8, 1, 2, 0xff]);
+    let transactions = rebyte()
+        .args(["transactions", "--root", path_text(&target)?, "--json"])
+        .output()?;
+    assert_success(&transactions);
+    assert!(stdout_text(&transactions).contains("\"transactions\": []"));
 
     let hashed = rebyte()
         .args(["hash", path_text(&source.join("README.txt"))?, "--json"])
@@ -126,6 +165,51 @@ fn publisher_workflow_generates_packs_verifies_hashes_and_applies()
         ])
         .output()?;
     assert_success(&checked);
+    let mut stdin_hash = rebyte()
+        .args(["hash", "-", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    stdin_hash
+        .stdin
+        .take()
+        .ok_or("hash stdin pipe is unavailable")?
+        .write_all(b"production artifact\n")?;
+    let stdin_hash = stdin_hash.wait_with_output()?;
+    assert_success(&stdin_hash);
+    assert!(stdout_text(&stdin_hash).contains(digest));
+
+    let token_path = directory.path().join("release.token");
+    let token_pack = rebyte()
+        .args([
+            "pack",
+            "--root",
+            path_text(&source)?,
+            "--private-key",
+            path_text(&private_key)?,
+            "--passphrase-file",
+            path_text(&passphrase)?,
+            "--output",
+            path_text(&token_path)?,
+            "--producer",
+            "integration-build",
+            "--format",
+            "token",
+            "--json",
+        ])
+        .output()?;
+    assert_success(&token_pack);
+    let token = fs::read_to_string(&token_path)?;
+    let token_verified = rebyte()
+        .args([
+            "verify",
+            token.trim(),
+            "--trusted-key",
+            path_text(&public_key)?,
+        ])
+        .output()?;
+    assert_success(&token_verified);
 
     let revoked_key = directory.path().join("publisher.revoked.json");
     let revoked = rebyte()
@@ -194,6 +278,9 @@ fn version_and_every_command_expose_help() -> Result<(), Box<dyn std::error::Err
             "key help missing for {command}"
         );
     }
+    let completions = rebyte().args(["completions", "bash"]).output()?;
+    assert_success(&completions);
+    assert!(stdout_text(&completions).contains("_rebyte"));
     Ok(())
 }
 
