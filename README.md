@@ -338,10 +338,6 @@ Scheduled workflows add Miri, fuzzing, mutation sampling, coverage and
 benchmarks. Current measured targets and baselines are documented in
 [quality](docs/quality.md).
 
-Internal AI-assisted notes and prompts belong only in the ignored `.ai/`
-directory. See [CONTRIBUTING.md](CONTRIBUTING.md) for review and Conventional
-Commit rules.
-
 ## Security
 
 No software is “100% secure”. Rebyte 1.0 provides a stable, fail-closed design
