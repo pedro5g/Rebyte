@@ -1,0 +1,18 @@
+[package]
+name = "rebyte-codec"
+description = "Bounded canonical codec for the Rebyte Artifact Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+base64.workspace = true
+rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+
+[lints]
+workspace = true

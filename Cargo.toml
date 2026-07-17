@@ -2,10 +2,14 @@
 resolver = "3"
 members = [
     "crates/rebyte-format",
+    "crates/rebyte-codec",
     "crates/rebyte-core",
     "crates/rebyte-cli",
     "xtask",
 ]
+
+[workspace.dependencies]
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
 [workspace.package]
 version = "0.1.0"

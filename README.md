@@ -37,6 +37,10 @@ The `rebyte-format` crate is `no_std + alloc` compatible and exposes only
 bounded protocol values. In particular, `RelativeArtifactPath` validates paths
 with platform-independent rules before any filesystem crate receives them.
 
+`rebyte-codec` implements the RAP v1 bytes directly rather than deriving a
+serializer format. Its cursor validates every length before slicing, rejects
+non-canonical manifests and supports unpadded `rb1_` Base64URL tokens.
+
 ## License
 
 Licensed under either Apache License, Version 2.0 or the MIT license, at your
