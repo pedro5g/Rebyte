@@ -258,9 +258,24 @@ impl PublicKeyDocument {
     /// # Errors
     ///
     /// Returns [`KeyDocumentError::UnsupportedDocument`] for future status
-    /// variants unknown to this document version.
+    /// variants unknown to this document version, or
+    /// [`KeyDocumentError::InvalidStatusTransition`] when attempting to make a
+    /// retired or revoked key active again.
     pub fn with_status(mut self, status: KeyStatus) -> Result<Self, KeyDocumentError> {
-        self.status = DocumentStatus::from_status(status)?;
+        let next = DocumentStatus::from_status(status)?;
+        let permitted = matches!(
+            (self.status, next),
+            (DocumentStatus::Active, _)
+                | (
+                    DocumentStatus::Retired,
+                    DocumentStatus::Retired | DocumentStatus::Revoked
+                )
+                | (DocumentStatus::Revoked, DocumentStatus::Revoked)
+        );
+        if !permitted {
+            return Err(KeyDocumentError::InvalidStatusTransition);
+        }
+        self.status = next;
         Ok(self)
     }
 
@@ -356,6 +371,8 @@ pub enum KeyDocumentError {
     InvalidPublicKey,
     /// Public key and fingerprint do not match the protected seed.
     IdentityMismatch,
+    /// Local trust status attempted to reactivate a retired or revoked key.
+    InvalidStatusTransition,
 }
 
 impl fmt::Display for KeyDocumentError {
@@ -370,6 +387,9 @@ impl fmt::Display for KeyDocumentError {
             Self::AuthenticationFailed => "wrong passphrase or modified private-key document",
             Self::InvalidPublicKey => "invalid publisher name or Ed25519 public key",
             Self::IdentityMismatch => "public key fingerprint does not match key material",
+            Self::InvalidStatusTransition => {
+                "retired or revoked publisher keys cannot be reactivated"
+            }
         })
     }
 }
@@ -614,6 +634,22 @@ mod tests {
         assert!(matches!(
             private.unlock(b"short"),
             Err(KeyDocumentError::InvalidPassphrase)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn trust_status_only_moves_toward_revocation() -> Result<(), Box<dyn std::error::Error>> {
+        let (_, public) = fixture()?;
+        let retired = public.with_status(KeyStatus::Retired)?;
+        assert!(matches!(
+            retired.clone().with_status(KeyStatus::Active),
+            Err(KeyDocumentError::InvalidStatusTransition)
+        ));
+        let revoked = retired.with_status(KeyStatus::Revoked)?;
+        assert!(matches!(
+            revoked.with_status(KeyStatus::Active),
+            Err(KeyDocumentError::InvalidStatusTransition)
         ));
         Ok(())
     }

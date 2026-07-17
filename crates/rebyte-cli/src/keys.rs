@@ -101,7 +101,6 @@ impl KeyChannelArgument {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum KeyStatusArgument {
-    Active,
     Retired,
     Revoked,
 }
@@ -109,7 +108,6 @@ enum KeyStatusArgument {
 impl KeyStatusArgument {
     const fn to_status(self) -> KeyStatus {
         match self {
-            Self::Active => KeyStatus::Active,
             Self::Retired => KeyStatus::Retired,
             Self::Revoked => KeyStatus::Revoked,
         }
