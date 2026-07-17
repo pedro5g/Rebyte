@@ -100,7 +100,10 @@ pub fn apply_transaction(
     persist_journal(&transaction, &journal)?;
 
     if let Err(error) = stage(capsule.files(), &root, &transaction, &mut journal) {
-        cleanup_transaction(&transactions, &transaction_id);
+        // Windows refuses to remove a transaction tree while this directory
+        // capability still owns an open handle to it.
+        drop(transaction);
+        let _cleanup_result = cleanup_transaction(&transactions, &transaction_id);
         return Err(error);
     }
     persist_journal(&transaction, &journal)?;
@@ -109,7 +112,8 @@ pub fn apply_transaction(
         if rollback(&root, &transaction, &mut journal).is_err() {
             return Err(ApplyError::RollbackFailed);
         }
-        cleanup_transaction(&transactions, &transaction_id);
+        drop(transaction);
+        let _cleanup_result = cleanup_transaction(&transactions, &transaction_id);
         return Err(error);
     }
 
@@ -128,7 +132,8 @@ pub fn apply_transaction(
             "{CONTROL_DIR}/{TRANSACTIONS_DIR}/{transaction_id}"
         )))
     } else {
-        cleanup_transaction(&transactions, &transaction_id);
+        drop(transaction);
+        cleanup_transaction(&transactions, &transaction_id)?;
         None
     };
     Ok(ApplyReport {
@@ -240,7 +245,8 @@ pub fn rollback_transaction(root: &Path, transaction_id: &str) -> Result<(), App
     let mut journal = load_journal(&transaction)?;
     reconcile(&root, &transaction, &mut journal)?;
     rollback(&root, &transaction, &mut journal)?;
-    cleanup_transaction(&transactions, transaction_id);
+    drop(transaction);
+    cleanup_transaction(&transactions, transaction_id)?;
     Ok(())
 }
 
@@ -875,8 +881,11 @@ fn validate_journal(journal: &Journal) -> Result<(), ApplyError> {
     Ok(())
 }
 
-fn cleanup_transaction(transactions: &Dir, id: &str) {
-    let _result = transactions.remove_dir_all(id);
+fn cleanup_transaction(transactions: &Dir, id: &str) -> Result<(), ApplyError> {
+    transactions
+        .remove_dir_all(id)
+        .map_err(|error| ApplyError::Io(error.kind()))?;
+    sync_directory(transactions)
 }
 
 fn remove_created_directories(root: &Dir, directories: &[String]) {
