@@ -44,6 +44,11 @@ non-canonical manifests and supports unpadded `rb1_` Base64URL tokens.
 `rebyte-integrity` exposes incremental BLAKE3 hashing with distinct RAP v1
 domains for files, manifests, payloads, capsule roots and publisher key IDs.
 
+`rebyte-compression` fixes native Zstandard level 3 and performs bounded
+streaming decompression. Signed output size, absolute limits and compression
+ratio are checked before and during expansion; the Wasm build uses a pure-Rust
+decoder and intentionally cannot encode Zstandard.
+
 ## License
 
 Licensed under either Apache License, Version 2.0 or the MIT license, at your

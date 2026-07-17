@@ -4,6 +4,7 @@ members = [
     "crates/rebyte-format",
     "crates/rebyte-codec",
     "crates/rebyte-integrity",
+    "crates/rebyte-compression",
     "crates/rebyte-core",
     "crates/rebyte-cli",
     "xtask",
@@ -13,6 +14,8 @@ members = [
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 blake3 = { version = "1.8", default-features = false }
 subtle = { version = "2.6", default-features = false }
+ruzstd = { version = "0.8", default-features = false, features = ["std"] }
+zstd = { version = "0.13", default-features = false }
 
 [workspace.package]
 version = "0.1.0"

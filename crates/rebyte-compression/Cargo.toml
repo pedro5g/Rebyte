@@ -1,0 +1,23 @@
+[package]
+name = "rebyte-compression"
+description = "Bounded streaming compression for Rebyte capsules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+zstd.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ruzstd.workspace = true
+
+[lints]
+workspace = true

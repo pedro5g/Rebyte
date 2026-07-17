@@ -12,3 +12,4 @@ and releases follow Semantic Versioning.
 - Bounded, portable RAP v1 protocol types and path validation.
 - Canonical bounded RAP v1 binary and textual codec.
 - Domain-separated incremental BLAKE3 integrity primitives.
+- Bounded native and WebAssembly Zstandard decompression.
