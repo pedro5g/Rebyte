@@ -5,6 +5,22 @@ and releases follow Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Canonical `ra1_`/`.rba` unsigned artifacts for exact files and portable
+  directory trees, including empty directories, executable bits and optional
+  untrusted name/destination hints.
+- Deterministic fast, balanced and maximum compression profiles.
+- Bounded streaming `.rba` encoding and transactional reconstruction for
+  inputs up to the explicit large-artifact policy, without full-file memory
+  allocation.
+- `--limits large` support for binary `encode`, `decode` and streaming `hash`.
+
+### Fixed
+
+- Preserve extremely compressible payloads instead of rejecting them during
+  encoding because their beneficial ratio exceeded a decoder policy.
+
 ## [1.1.0] - 2026-07-16
 
 ### Added

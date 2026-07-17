@@ -4,8 +4,9 @@
 [![Security audit](https://github.com/pedro5g/Rebyte/actions/workflows/scheduled.yml/badge.svg)](https://github.com/pedro5g/Rebyte/actions/workflows/scheduled.yml)
 [![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Rebyte is an offline byte-exact reconstruction tool. Its simple mode turns one
-file into a compressed, integrity-checked `rf1_` token without keys. Its
+Rebyte is an offline byte-exact reconstruction tool. Its simple mode turns a
+file or portable directory into a compressed, integrity-checked `ra1_` token
+or `.rba` binary artifact without keys. Its
 authenticated mode packages a directory into a deterministic RAP v1 capsule,
 signs it with Ed25519 and reconstructs files only after bounded parsing,
 trust-policy verification, decompression and byte-level integrity checks.
@@ -16,7 +17,7 @@ command execution, lifecycle hooks or generated-code interpretation.
 ## Why Rebyte
 
 - exact byte-for-byte reconstruction with domain-separated BLAKE3 digests;
-- one-command unsigned file tokens for local transport and reproducible demos;
+- one-command unsigned file or directory artifacts for local transport;
 - canonical binary encoding independent of `serde` or a language runtime;
 - explicit publisher trust using production, staging and development channels;
 - encrypted offline signing keys and distributable public trust documents;
@@ -42,15 +43,18 @@ rebyte --version
 rebyte doctor
 ```
 
-### One file without keys
+### Files and folders without keys
 
-Use an unsigned File Token when you only need portable bytes plus corruption
+Use an unsigned Artifact Token when you only need portable bytes plus corruption
 detection and do not need to authenticate who produced them:
 
 ```console
-rebyte encode ./original.txt --output original.rf1
-rebyte decode --file original.rf1 --output ./copy.txt
+rebyte encode ./original.txt --output original.ra1
+rebyte decode --file original.ra1 --output ./copy.txt
 cmp ./original.txt ./copy.txt
+
+rebyte encode ./project --format binary --output project.rba
+rebyte decode --file project.rba --output ./project-copy
 ```
 
 For short tokens, pass the string directly. In Fish:
@@ -61,10 +65,29 @@ set TOKEN ($REBYTE encode ./original.txt)
 $REBYTE decode "$TOKEN" --output ./copy.txt
 ```
 
-`rf1_` is not a signature. Anyone can create a different internally valid
+`ra1_` is not a signature. Anyone can create a different internally valid
 token. Use the signed workflow below for releases, deployments or any input
 crossing a trust boundary. The complete format and verification order are in
-[File Token v1](schemas/file-token-v1.md).
+[Artifact Token v1](schemas/artifact-token-v1.md). Legacy `rf1_` file tokens
+remain decodable.
+
+For inputs above the standard 64 MiB per-file limit, use the bounded streaming
+binary mode. It never places the full source, compressed artifact or restored
+file in memory:
+
+```console
+rebyte encode ./large.bin \
+  --format binary --limits large --profile maximum \
+  --output large.rba
+
+rebyte decode --file large.rba --limits large --output ./large-copy.bin
+rebyte hash ./large.bin --limits large
+rebyte hash ./large-copy.bin --limits large
+```
+
+`--limits large` is explicit, remains bounded, and is available only with
+seekable binary artifact files. Inline tokens keep the smaller standard bounds
+because shells and environment variables are unsuitable for very large data.
 
 ### Signed publisher workflow
 
@@ -133,8 +156,8 @@ use terminal-aware color; redirected output and `NO_COLOR` remain plain.
 
 | Command | Purpose |
 |---|---|
-| `encode` | Turn one file into an unsigned compressed `rf1_` token |
-| `decode` | Verify integrity and reconstruct an unsigned token into a new file |
+| `encode` | Turn a file or folder into an unsigned `ra1_`/`.rba` artifact |
+| `decode` | Verify and reconstruct an unsigned artifact into a new path |
 | `key generate` | Create a random encrypted private key and public trust document |
 | `key inspect` | Validate and display a public key, fingerprint, channel and status |
 | `key status` | Produce an active, retired or revoked public trust document |
@@ -232,7 +255,8 @@ document. Do not merely remove a compromised key when operators need a clear
 
 ## RAP file hashes
 
-`rebyte hash` is streaming and bounded to the RAP v1 single-file limit. Its
+`rebyte hash` is streaming and bounded to the selected standard or large
+single-file limit. Its
 result is a domain-separated BLAKE3 digest using context `rebyte:v1:file`; it
 is intentionally different from a generic `b3sum` of the same bytes.
 
@@ -243,6 +267,7 @@ bytes already exist and only comparison is required.
 
 ```console
 rebyte hash ./artifact/config.toml
+rebyte hash ./large-image.raw --limits large
 rebyte hash ./artifact/config.toml --json
 rebyte hash ./artifact/config.toml --check "$EXPECTED_RAP_DIGEST"
 printf 'exact bytes' | rebyte hash -

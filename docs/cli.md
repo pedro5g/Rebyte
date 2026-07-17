@@ -23,42 +23,60 @@ rebyte help verify
   capsule tokens or file content.
 - existing key, capsule, token and reconstructed output files are never
   overwritten.
-- `rf1_` file tokens provide integrity without publisher authentication;
+- `ra1_` artifact tokens and `.rba` files provide integrity without publisher
+  authentication; legacy `rf1_` file tokens remain decode-only;
   `rb1_` RAP tokens require signature and trust verification.
 
-## Simple file tokens
+## Simple unsigned artifacts
 
 ### `encode`
 
 ```text
-rebyte encode PATH|- [--compression auto|zstd|none]
+rebyte encode FILE|DIRECTORY|- [--compression auto|zstd|none]
               [--profile fast|balanced|maximum]
+              [--include-name | --name NAME]
+              [--suggest-path RELATIVE_PATH]
+              [--format token|binary] [--limits standard|large]
   [--output PATH] [--json]
 ```
 
-Without `--output`, the command writes only the `rf1_` token and a newline to
+Without `--output`, token format writes only the `ra1_` token and a newline to
 stdout, making command substitution safe. `auto` tries deterministic
-Zstandard and keeps it only when its payload is smaller. Input is a bounded
-regular no-follow file or bounded stdin. With `--output`, the destination is
-created exclusively and receives one newline-terminated token.
+Zstandard and keeps it only when its payload is smaller. Files and complete
+portable directory trees are supported; symlinks and special files are
+rejected. Optional name and relative-path fields are untrusted reconstruction
+hints.
+
+Binary format requires `--output` and creates a canonical `.rba` without
+Base64URL expansion. `--limits large` requires binary format and a seekable
+file or directory. Its streaming implementation hashes the source, verifies
+the same bytes while encoding, self-verifies the staged envelope, and creates
+the destination without replacing an existing path.
 
 ### `decode`
 
 ```text
-rebyte decode TOKEN --output PATH [--json]
-rebyte decode --file TOKEN_FILE --output PATH [--json]
-rebyte decode - --output PATH [--json]
+rebyte decode TOKEN [--output PATH] [--json]
+rebyte decode --file TOKEN_OR_RBA [--output PATH]
+  [--limits standard|large] [--json]
+rebyte decode - [--output PATH] [--json]
+rebyte decode TOKEN --root PATH --accept-suggested-path [--name NAME]
 ```
 
 Decode validates canonical Base64URL, the fixed header, declared lengths,
 compression limits and the embedded domain-separated digest before creating
-the output. Existing outputs are never replaced. Successful reports say
+the output. A supplied `--output` always overrides embedded hints. Without it,
+Rebyte previews the suggested destination and writes nothing until
+`--accept-suggested-path` is supplied. The preview digest is rechecked during
+the writing pass to prevent an input-swap race.
+
+Existing outputs are never replaced. Successful reports say
 `authenticated: false`: the token proves internal consistency, not authorship.
 
-For large tokens prefer `--file` or stdin; operating systems impose different
-command-line length limits. Compression effectiveness depends on input
-redundancy. Base64URL and the fixed header can make incompressible small files
-larger than their source.
+For large artifacts use `.rba`, `--file` and `--limits large`; operating
+systems impose different command-line length limits. Compression effectiveness
+depends on input redundancy. Base64URL and the fixed header can make
+incompressible small files larger than their source.
 
 ## Publisher commands
 
@@ -110,11 +128,13 @@ format writes one newline-terminated `rb1_` value.
 ### `hash`
 
 ```text
-rebyte hash PATH|- [--check LOWERCASE_HEX] [--json]
+rebyte hash PATH|- [--check LOWERCASE_HEX]
+  [--limits standard|large] [--json]
 ```
 
 Computes the domain-separated RAP file digest incrementally. `--check` expects
-exactly 64 lowercase hexadecimal characters.
+exactly 64 lowercase hexadecimal characters. `large` raises only the bounded
+streaming byte limit; it does not change the algorithm or digest.
 
 ## Consumer commands
 

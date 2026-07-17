@@ -1002,6 +1002,7 @@ dependencies = [
  "rebyte-compression",
  "rebyte-format",
  "rebyte-integrity",
+ "tempfile",
 ]
 
 [[package]]

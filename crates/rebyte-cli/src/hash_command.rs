@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use rebyte_format::{Digest32, SecurityLimits};
 use rebyte_integrity::{DomainHasher, digest_matches};
 use serde::Serialize;
@@ -22,16 +22,35 @@ pub(super) struct HashCommand {
     /// Require the computed lowercase hexadecimal digest to match.
     #[arg(long, value_name = "HEX")]
     check: Option<String>,
+    /// Resource bound for the streaming input.
+    #[arg(long, value_enum, default_value = "standard")]
+    limits: HashLimits,
     /// Emit stable JSON instead of terminal text.
     #[arg(long)]
     json: bool,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum HashLimits {
+    Standard,
+    Large,
+}
+
+impl HashLimits {
+    const fn maximum(self) -> u64 {
+        match self {
+            Self::Standard => SecurityLimits::V1.max_single_file_bytes,
+            Self::Large => SecurityLimits::LARGE_ARTIFACT.max_single_file_bytes,
+        }
+    }
+}
+
 pub(super) fn run(command: &HashCommand) -> Result<(), CliError> {
+    let maximum = command.limits.maximum();
     let (digest, bytes) = if command.input.as_os_str() == "-" {
-        hash_reader(io::stdin().lock())?
+        hash_reader(io::stdin().lock(), maximum)?
     } else {
-        hash_path(&command.input)?
+        hash_path(&command.input, maximum)?
     };
     if let Some(expected) = &command.check {
         let expected = decode_digest(expected)?;
@@ -66,7 +85,7 @@ pub(super) fn run(command: &HashCommand) -> Result<(), CliError> {
     }
 }
 
-fn hash_path(path: &Path) -> Result<(Digest32, u64), CliError> {
+fn hash_path(path: &Path, maximum: u64) -> Result<(Digest32, u64), CliError> {
     let filename = path
         .file_name()
         .ok_or_else(|| CliError::new(EXIT_GENERIC, "hash input has no file name"))?;
@@ -91,17 +110,16 @@ fn hash_path(path: &Path) -> Result<(Digest32, u64), CliError> {
     let metadata = file.metadata().map_err(|error| {
         CliError::new(EXIT_GENERIC, format!("cannot inspect hash input: {error}"))
     })?;
-    if !metadata.is_file() || metadata.len() > SecurityLimits::V1.max_single_file_bytes {
+    if !metadata.is_file() || metadata.len() > maximum {
         return Err(CliError::new(
             EXIT_GENERIC,
             "hash input is not a regular file within the RAP file-size limit",
         ));
     }
-    hash_reader(file)
+    hash_reader(file, maximum)
 }
 
-fn hash_reader(mut reader: impl io::Read) -> Result<(Digest32, u64), CliError> {
-    let maximum = SecurityLimits::V1.max_single_file_bytes;
+fn hash_reader(mut reader: impl io::Read, maximum: u64) -> Result<(Digest32, u64), CliError> {
     let mut hasher = DomainHasher::file();
     let mut total = 0_u64;
     let mut buffer = vec![0_u8; 64 * 1_024].into_boxed_slice();

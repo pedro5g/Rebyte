@@ -85,3 +85,24 @@ reserved `.rebyte` root.
 Consumers must never write to a suggested path silently. A caller-provided
 output overrides all hints; otherwise explicit acceptance below a selected
 root is required.
+
+## Streaming and resource profiles
+
+The canonical bytes are identical whether created in memory or through the
+filesystem streaming API. Streaming encoders hash each regular source file,
+then require the bytes and digest to remain identical during payload creation.
+The completed envelope is decoded and verified in staging before it is exposed
+at the requested `.rba` path.
+
+Streaming decoders first validate header and manifest bounds, decompress to a
+temporary file, verify envelope, content and every per-file digest, and only
+then commit a new output. Corrupt or truncated input cannot leave a partial
+destination. A decoder applying metadata from an earlier preview must require
+the same envelope digest during the writing pass.
+
+The standard profile uses `SecurityLimits::SIMPLE_ARTIFACT`. The opt-in
+`SecurityLimits::LARGE_ARTIFACT` profile permits a 256 GiB aggregate and
+single file, a 64 GiB stored payload, a 64 MiB manifest and 100,000 entries.
+It is intended only for streaming binary files, not inline Base64URL tokens.
+These are implementation safety ceilings, not format capabilities or a claim
+that every host has sufficient storage.

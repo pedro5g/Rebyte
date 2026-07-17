@@ -16,6 +16,13 @@ use crate::model::{
     DecodedArtifact, EncodedArtifact,
 };
 
+mod stream;
+
+pub use stream::{
+    ArtifactIoError, ArtifactPathMetadata, StreamArtifactReport, decode_artifact_file,
+    decode_artifact_file_expected, encode_artifact_path,
+};
+
 /// Text prefix for a Base64URL Artifact Token v1.
 pub const ARTIFACT_TOKEN_PREFIX: &str = "ra1_";
 /// Fixed byte length of an Artifact Token v1 binary header.
@@ -667,6 +674,12 @@ fn content_digest(kind: ArtifactKind, entries: &[CanonicalEntry]) -> Digest32 {
 }
 
 fn envelope_digest(header: &Header, manifest: &[u8], stored: &[u8]) -> Digest32 {
+    let mut hasher = envelope_hasher(header, manifest);
+    hasher.update(stored);
+    hasher.finalize()
+}
+
+fn envelope_hasher(header: &Header, manifest: &[u8]) -> DomainHasher {
     let mut hasher = DomainHasher::artifact_envelope();
     hasher.update(&[
         VERSION,
@@ -681,8 +694,7 @@ fn envelope_digest(header: &Header, manifest: &[u8], stored: &[u8]) -> Digest32 
     hasher.update(&header.stored_size.to_be_bytes());
     hasher.update(header.content_digest.as_bytes());
     hasher.update(manifest);
-    hasher.update(stored);
-    hasher.finalize()
+    hasher
 }
 
 const fn profile_wire(value: CompressionProfile) -> u8 {

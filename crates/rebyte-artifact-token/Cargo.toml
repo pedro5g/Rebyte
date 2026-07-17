@@ -17,6 +17,7 @@ base64.workspace = true
 rebyte-compression = { path = "../rebyte-compression", version = "1.0.0" }
 rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
 rebyte-integrity = { path = "../rebyte-integrity", version = "1.0.0" }
+tempfile.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::io::Write as _;
+use std::io::{Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -40,6 +40,72 @@ fn large_text_round_trips_through_a_short_token() -> Result<(), Box<dyn std::err
     let original_hash = hash_digest(&original)?;
     let reconstructed_hash = hash_digest(&reconstructed)?;
     assert_eq!(original_hash, reconstructed_hash);
+    Ok(())
+}
+
+#[test]
+fn large_binary_mode_streams_beyond_the_standard_file_limit()
+-> Result<(), Box<dyn std::error::Error>> {
+    const SIZE: u64 = 65 * 1_024 * 1_024;
+
+    let directory = tempdir()?;
+    let original = directory.path().join("large-sparse.bin");
+    let rejected = directory.path().join("rejected.rba");
+    let artifact = directory.path().join("large.rba");
+    let reconstructed = directory.path().join("large-restored.bin");
+    let mut source = fs::File::create(&original)?;
+    source.set_len(SIZE)?;
+    source.seek(SeekFrom::Start(SIZE / 2))?;
+    source.write_all(b"rebyte-streaming-boundary")?;
+    source.sync_all()?;
+
+    let standard = rebyte()
+        .args([
+            "encode",
+            path_text(&original)?,
+            "--format",
+            "binary",
+            "--output",
+            path_text(&rejected)?,
+        ])
+        .output()?;
+    assert!(!standard.status.success());
+    assert!(!rejected.exists());
+
+    let encoded = rebyte()
+        .args([
+            "encode",
+            path_text(&original)?,
+            "--format",
+            "binary",
+            "--limits",
+            "large",
+            "--profile",
+            "maximum",
+            "--output",
+            path_text(&artifact)?,
+        ])
+        .output()?;
+    assert_success(&encoded);
+    assert!(fs::metadata(&artifact)?.len() < SIZE / 100);
+
+    let decoded = rebyte()
+        .args([
+            "decode",
+            "--file",
+            path_text(&artifact)?,
+            "--limits",
+            "large",
+            "--output",
+            path_text(&reconstructed)?,
+        ])
+        .output()?;
+    assert_success(&decoded);
+    assert_eq!(fs::metadata(&reconstructed)?.len(), SIZE);
+    assert_eq!(
+        hash_digest_with_limits(&original, "large")?,
+        hash_digest_with_limits(&reconstructed, "large")?
+    );
     Ok(())
 }
 
@@ -290,8 +356,15 @@ fn shell_env_emits_all_supported_assignment_syntax() -> Result<(), Box<dyn std::
 }
 
 fn hash_digest(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    hash_digest_with_limits(path, "standard")
+}
+
+fn hash_digest_with_limits(
+    path: &Path,
+    limits: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let output = rebyte()
-        .args(["hash", path_text(path)?, "--json"])
+        .args(["hash", path_text(path)?, "--limits", limits, "--json"])
         .output()?;
     assert_success(&output);
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;

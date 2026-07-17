@@ -2,15 +2,17 @@
 
 #![allow(clippy::redundant_pub_crate)]
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use rebyte_core::{
     ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactEntry, ArtifactEntryKind,
-    ArtifactKind, ArtifactOptions, ArtifactTokenError, CompressionProfile, DecodedArtifact,
-    FileTokenError, decode_artifact, decode_artifact_token, decode_file_token, encode_artifact,
+    ArtifactIoError, ArtifactKind, ArtifactOptions, ArtifactPathMetadata, ArtifactTokenError,
+    CompressionProfile, DecodedArtifact, FileTokenError, StreamArtifactReport, decode_artifact,
+    decode_artifact_file, decode_artifact_file_expected, decode_artifact_token, decode_file_token,
+    encode_artifact, encode_artifact_path,
 };
 use rebyte_format::{CompressionAlgorithm, RelativeArtifactPath, SecurityLimits};
 use serde::Serialize;
@@ -42,6 +44,9 @@ pub(super) struct EncodeCommand {
     /// Emit an inline token or raw `.rba` binary envelope.
     #[arg(long, value_enum, default_value = "token")]
     format: RepresentationArgument,
+    /// Resource bounds; `large` is streaming-only and must use binary format.
+    #[arg(long, value_enum, default_value = "standard")]
+    limits: ResourceLimitsArgument,
     /// Write into a new file instead of standard output.
     #[arg(short, long, value_name = "PATH")]
     output: Option<PathBuf>,
@@ -80,6 +85,9 @@ pub(super) struct DecodeCommand {
         conflicts_with = "output"
     )]
     name: Option<String>,
+    /// Resource bounds for a binary `.rba`; inline text always stays standard.
+    #[arg(long, value_enum, default_value = "standard")]
+    limits: ResourceLimitsArgument,
     /// Emit a stable JSON report.
     #[arg(long)]
     json: bool,
@@ -125,6 +133,21 @@ enum RepresentationArgument {
     Binary,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ResourceLimitsArgument {
+    Standard,
+    Large,
+}
+
+impl ResourceLimitsArgument {
+    const fn value(self) -> SecurityLimits {
+        match self {
+            Self::Standard => SecurityLimits::SIMPLE_ARTIFACT,
+            Self::Large => SecurityLimits::LARGE_ARTIFACT,
+        }
+    }
+}
+
 impl RepresentationArgument {
     const fn name(self) -> &'static str {
         match self {
@@ -141,7 +164,29 @@ pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
             "--format binary requires --output to protect the terminal",
         ));
     }
-    let mut artifact = read_source(command)?;
+    if command.limits == ResourceLimitsArgument::Large
+        && command.format != RepresentationArgument::Binary
+    {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "--limits large requires --format binary for bounded streaming",
+        ));
+    }
+    if command.limits == ResourceLimitsArgument::Large && command.input.as_os_str() == "-" {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "--limits large requires a seekable file or directory input",
+        ));
+    }
+    let limits = command.limits.value();
+    let options = ArtifactOptions::default()
+        .with_compression(command.compression.to_policy())
+        .with_profile(command.profile.to_profile())
+        .with_limits(limits);
+    if command.format == RepresentationArgument::Binary && command.input.as_os_str() != "-" {
+        return encode_binary_path(command, &options);
+    }
+    let mut artifact = read_source(command, &limits)?;
     if let Some(name) = selected_name(command)? {
         artifact = artifact
             .with_suggested_name(&name)
@@ -153,9 +198,6 @@ pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
                 CliError::new(EXIT_MALFORMED, format!("invalid suggested path: {error}"))
             })?);
     }
-    let options = ArtifactOptions::default()
-        .with_compression(command.compression.to_policy())
-        .with_profile(command.profile.to_profile());
     let encoded = encode_artifact(&artifact, &options).map_err(artifact_encode_error)?;
     let token = if command.format == RepresentationArgument::Token {
         Some(
@@ -208,18 +250,69 @@ pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
             None
         },
     };
+    emit_encode_report(command, &report)
+}
+
+fn encode_binary_path(command: &EncodeCommand, options: &ArtifactOptions) -> Result<(), CliError> {
+    let output = command
+        .output
+        .as_ref()
+        .ok_or_else(|| CliError::new(EXIT_MALFORMED, "--format binary requires --output"))?;
+    let mut metadata = ArtifactPathMetadata::new();
+    if let Some(name) = selected_name(command)? {
+        metadata = metadata
+            .with_suggested_name(&name)
+            .map_err(artifact_encode_error)?;
+    }
+    if let Some(path) = &command.suggest_path {
+        metadata =
+            metadata.with_suggested_path(RelativeArtifactPath::new(path).map_err(|error| {
+                CliError::new(EXIT_MALFORMED, format!("invalid suggested path: {error}"))
+            })?);
+    }
+    let streamed = encode_artifact_path(&command.input, output, &metadata, options)
+        .map_err(|error| artifact_io_error(&error))?;
+    let report = EncodeReport {
+        schema_version: 2,
+        kind: "unsignedArtifact",
+        artifact_kind: artifact_kind_name(streamed.kind()),
+        authenticated: false,
+        content_digest: encode_digest(&streamed.content_digest()),
+        envelope_digest: encode_digest(&streamed.envelope_digest()),
+        entries: streamed.entry_count(),
+        original_bytes: streamed.original_size(),
+        stored_bytes: streamed.stored_size(),
+        representation: command.format.name(),
+        output: Some(output.to_string_lossy().into_owned()),
+        token: None,
+    };
+    emit_encode_report(command, &report)
+}
+
+fn emit_encode_report(command: &EncodeCommand, report: &EncodeReport<'_>) -> Result<(), CliError> {
     if command.json {
-        write_json(&report)
+        write_json(report)
     } else if let Some(token) = report.token {
         println!("{token}");
         Ok(())
     } else {
-        print_encode_report(&report);
+        print_encode_report(report);
         Ok(())
     }
 }
 
 pub(super) fn decode(command: &DecodeCommand) -> Result<(), CliError> {
+    if let Some(path) = command.token_file.as_deref()
+        && is_binary_artifact_file(path)?
+    {
+        return decode_binary_command(command, path);
+    }
+    if command.limits == ResourceLimitsArgument::Large {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "--limits large is available only for binary .rba files",
+        ));
+    }
     match read_input(command)? {
         SimpleInput::LegacyToken(token) => decode_legacy(command, &token),
         SimpleInput::ArtifactToken(token) => {
@@ -233,6 +326,79 @@ pub(super) fn decode(command: &DecodeCommand) -> Result<(), CliError> {
             decode_artifact_command(command, &decoded)
         }
     }
+}
+
+fn decode_binary_command(command: &DecodeCommand, input: &Path) -> Result<(), CliError> {
+    let limits = command.limits.value();
+    let (report, target) = if let Some(output) = &command.output {
+        let report = decode_artifact_file(input, Some(output), &limits)
+            .map_err(|error| artifact_io_error(&error))?;
+        (report, Some(output.clone()))
+    } else {
+        let preview = decode_artifact_file(input, None, &limits)
+            .map_err(|error| artifact_io_error(&error))?;
+        let target =
+            resolve_target_hints(command, preview.suggested_name(), preview.suggested_path())?;
+        if let Some(target) = &target {
+            let applied =
+                decode_artifact_file_expected(input, target, &limits, &preview.envelope_digest())
+                    .map_err(|error| artifact_io_error(&error))?;
+            (applied, Some(target.clone()))
+        } else {
+            (preview, None)
+        }
+    };
+    emit_stream_decode_report(command, &report, target)
+}
+
+fn emit_stream_decode_report(
+    command: &DecodeCommand,
+    streamed: &StreamArtifactReport,
+    target: Option<PathBuf>,
+) -> Result<(), CliError> {
+    let written = target.is_some();
+    let report = DecodeReport {
+        schema_version: 2,
+        kind: "unsignedArtifact",
+        artifact_kind: artifact_kind_name(streamed.kind()),
+        authenticated: false,
+        integrity_verified: true,
+        content_digest: encode_digest(&streamed.content_digest()),
+        envelope_digest: encode_digest(&streamed.envelope_digest()),
+        entries: streamed.entry_count(),
+        reconstructed_bytes: streamed.original_size(),
+        stored_bytes: streamed.stored_size(),
+        compression: compression_name(streamed.compression()),
+        suggested_name: streamed.suggested_name(),
+        suggested_path: streamed.suggested_path().map(RelativeArtifactPath::as_str),
+        output: target.map(|path| path.to_string_lossy().into_owned()),
+        written,
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        print_decode_report(&report);
+        Ok(())
+    }
+}
+
+fn is_binary_artifact_file(path: &Path) -> Result<bool, CliError> {
+    let mut file = File::open(path)
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot open artifact: {error}")))?;
+    let mut prefix = [0_u8; 4];
+    let mut read = 0;
+    while read < prefix.len() {
+        let count = file.read(&mut prefix[read..]).map_err(|error| {
+            CliError::new(EXIT_GENERIC, format!("cannot inspect artifact: {error}"))
+        })?;
+        if count == 0 {
+            break;
+        }
+        read = read
+            .checked_add(count)
+            .ok_or_else(|| CliError::new(EXIT_GENERIC, "artifact length overflow"))?;
+    }
+    Ok(read == prefix.len() && &prefix == BINARY_MAGIC)
 }
 
 fn decode_artifact_command(
@@ -318,8 +484,7 @@ fn decode_legacy(command: &DecodeCommand, token: &str) -> Result<(), CliError> {
     }
 }
 
-fn read_source(command: &EncodeCommand) -> Result<Artifact, CliError> {
-    let limits = SecurityLimits::SIMPLE_ARTIFACT;
+fn read_source(command: &EncodeCommand, limits: &SecurityLimits) -> Result<Artifact, CliError> {
     if command.input.as_os_str() == "-" {
         let bytes = read_bounded(io::stdin().lock(), limits.max_single_file_bytes)?;
         return Ok(Artifact::file(bytes, false));
@@ -344,7 +509,7 @@ fn read_source(command: &EncodeCommand) -> Result<Artifact, CliError> {
     }
     if metadata.is_dir() {
         let mut entries = Vec::new();
-        collect_directory(&command.input, &command.input, &mut entries, &limits)?;
+        collect_directory(&command.input, &command.input, &mut entries, limits)?;
         return Ok(Artifact::directory(entries));
     }
     Err(CliError::new(
@@ -525,6 +690,18 @@ fn resolve_target(
     command: &DecodeCommand,
     artifact: &Artifact,
 ) -> Result<Option<PathBuf>, CliError> {
+    resolve_target_hints(
+        command,
+        artifact.suggested_name(),
+        artifact.suggested_path(),
+    )
+}
+
+fn resolve_target_hints(
+    command: &DecodeCommand,
+    suggested_name: Option<&str>,
+    suggested_path: Option<&RelativeArtifactPath>,
+) -> Result<Option<PathBuf>, CliError> {
     if let Some(output) = &command.output {
         create_parent(output)?;
         return Ok(Some(output.clone()));
@@ -532,12 +709,8 @@ fn resolve_target(
     if !command.accept_suggested_path {
         return Ok(None);
     }
-    let mut relative = artifact.suggested_path().map_or_else(
-        || {
-            artifact
-                .suggested_name()
-                .map_or_else(PathBuf::new, PathBuf::from)
-        },
+    let mut relative = suggested_path.map_or_else(
+        || suggested_name.map_or_else(PathBuf::new, PathBuf::from),
         |path| portable_path(path.as_str()),
     );
     if let Some(name) = &command.name {
@@ -810,6 +983,24 @@ fn read_bounded(mut reader: impl io::Read, maximum: u64) -> Result<Vec<u8>, CliE
 
 fn artifact_encode_error(error: ArtifactTokenError) -> CliError {
     CliError::new(EXIT_GENERIC, error.to_string())
+}
+
+fn artifact_io_error(error: &ArtifactIoError) -> CliError {
+    let message = error.to_string();
+    let exit_code = if matches!(
+        error,
+        ArtifactIoError::Format(
+            ArtifactTokenError::EnvelopeDigestMismatch
+                | ArtifactTokenError::ContentDigestMismatch
+                | ArtifactTokenError::FileDigestMismatch
+                | ArtifactTokenError::Compression(_)
+        )
+    ) {
+        EXIT_DIGEST
+    } else {
+        EXIT_GENERIC
+    };
+    CliError::new(exit_code, message)
 }
 
 fn artifact_decode_error(error: ArtifactTokenError) -> CliError {
