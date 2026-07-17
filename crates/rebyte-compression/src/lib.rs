@@ -71,6 +71,8 @@ pub enum CompressionError {
     InvalidStream,
     /// Native compression failed.
     CompressionFailed,
+    /// Dictionary training or decoding failed.
+    InvalidDictionary,
     /// A source stream could not be read.
     InputReadFailed,
     /// A destination stream could not be written.
@@ -101,6 +103,7 @@ impl fmt::Display for CompressionError {
             }
             Self::InvalidStream => formatter.write_str("invalid or truncated compression stream"),
             Self::CompressionFailed => formatter.write_str("compression failed"),
+            Self::InvalidDictionary => formatter.write_str("invalid Zstandard dictionary"),
             Self::InputReadFailed => formatter.write_str("cannot read compression input"),
             Self::OutputWriteFailed => formatter.write_str("cannot write compression output"),
             Self::UnsupportedEncoder => {
@@ -120,6 +123,33 @@ pub struct CompressionStats {
     pub input_bytes: u64,
     /// Exact bytes written to the destination.
     pub output_bytes: u64,
+}
+
+/// Algorithm plus optional borrowed dictionary for one compression operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompressionMethod<'a> {
+    algorithm: CompressionAlgorithm,
+    dictionary: &'a [u8],
+}
+
+impl<'a> CompressionMethod<'a> {
+    /// Selects an algorithm without a dictionary.
+    #[must_use]
+    pub const fn new(algorithm: CompressionAlgorithm) -> Self {
+        Self {
+            algorithm,
+            dictionary: &[],
+        }
+    }
+
+    /// Selects Zstandard with a caller-supplied dictionary.
+    #[must_use]
+    pub const fn zstd_with_dictionary(dictionary: &'a [u8]) -> Self {
+        Self {
+            algorithm: CompressionAlgorithm::Zstd,
+            dictionary,
+        }
+    }
 }
 
 /// Compresses payload bytes using the balanced RAP encoder profile.
@@ -151,11 +181,32 @@ pub fn compress_with_profile(
     profile: CompressionProfile,
     limits: &SecurityLimits,
 ) -> Result<Vec<u8>, CompressionError> {
+    compress_with_dictionary(input, algorithm, profile, &[], limits)
+}
+
+/// Compresses bytes using an optional embedded Zstandard dictionary.
+///
+/// A dictionary is valid only with [`CompressionAlgorithm::Zstd`]. Callers
+/// must account for the dictionary bytes when deciding whether it improves
+/// the complete container size.
+///
+/// # Errors
+///
+/// Returns [`CompressionError`] for invalid algorithm/dictionary combinations
+/// and the same failures as [`compress_with_profile`].
+pub fn compress_with_dictionary(
+    input: &[u8],
+    algorithm: CompressionAlgorithm,
+    profile: CompressionProfile,
+    dictionary: &[u8],
+    limits: &SecurityLimits,
+) -> Result<Vec<u8>, CompressionError> {
     let input_len = usize_to_u64(input.len())?;
     enforce_output_limit(input_len, limits)?;
     let output = match algorithm {
-        CompressionAlgorithm::None => input.to_vec(),
-        CompressionAlgorithm::Zstd => compress_zstd(input, profile)?,
+        CompressionAlgorithm::None if dictionary.is_empty() => input.to_vec(),
+        CompressionAlgorithm::None => return Err(CompressionError::InvalidDictionary),
+        CompressionAlgorithm::Zstd => compress_zstd(input, profile, dictionary)?,
     };
     enforce_compressed_limit(usize_to_u64(output.len())?, limits)?;
     Ok(output)
@@ -178,13 +229,44 @@ pub fn compress_stream(
     declared_input_size: u64,
     limits: &SecurityLimits,
 ) -> Result<CompressionStats, CompressionError> {
+    compress_stream_with_dictionary(
+        input,
+        output,
+        CompressionMethod::new(algorithm),
+        profile,
+        declared_input_size,
+        limits,
+    )
+}
+
+/// Compresses an exact stream using an optional Zstandard dictionary.
+///
+/// # Errors
+///
+/// Returns [`CompressionError`] for invalid dictionary use, exact-size,
+/// resource, I/O or native encoder failures.
+pub fn compress_stream_with_dictionary(
+    input: &mut impl io::Read,
+    output: &mut impl io::Write,
+    method: CompressionMethod<'_>,
+    profile: CompressionProfile,
+    declared_input_size: u64,
+    limits: &SecurityLimits,
+) -> Result<CompressionStats, CompressionError> {
     enforce_output_limit(declared_input_size, limits)?;
     let mut bounded = BoundedWriter::new(output, limits.max_compressed_payload_bytes);
-    let operation = match algorithm {
-        CompressionAlgorithm::None => copy_declared(input, &mut bounded, declared_input_size),
-        CompressionAlgorithm::Zstd => {
-            compress_zstd_stream(input, &mut bounded, profile, declared_input_size)
+    let operation = match method.algorithm {
+        CompressionAlgorithm::None if method.dictionary.is_empty() => {
+            copy_declared(input, &mut bounded, declared_input_size)
         }
+        CompressionAlgorithm::None => return Err(CompressionError::InvalidDictionary),
+        CompressionAlgorithm::Zstd => compress_zstd_stream(
+            input,
+            &mut bounded,
+            profile,
+            method.dictionary,
+            declared_input_size,
+        ),
     };
     if bounded.exceeded {
         return Err(CompressionError::CompressedInputTooLarge {
@@ -212,13 +294,32 @@ pub fn decompress(
     declared_output_size: u64,
     limits: &SecurityLimits,
 ) -> Result<Vec<u8>, CompressionError> {
+    decompress_with_dictionary(input, algorithm, &[], declared_output_size, limits)
+}
+
+/// Decompresses payload bytes with an optional embedded dictionary.
+///
+/// # Errors
+///
+/// Returns [`CompressionError`] for invalid dictionary use or the failures
+/// documented by [`decompress`].
+pub fn decompress_with_dictionary(
+    input: &[u8],
+    algorithm: CompressionAlgorithm,
+    dictionary: &[u8],
+    declared_output_size: u64,
+    limits: &SecurityLimits,
+) -> Result<Vec<u8>, CompressionError> {
     let compressed_size = usize_to_u64(input.len())?;
     enforce_compressed_limit(compressed_size, limits)?;
     enforce_output_limit(declared_output_size, limits)?;
     enforce_ratio(compressed_size, declared_output_size, limits)?;
     let output = match algorithm {
-        CompressionAlgorithm::None => input.to_vec(),
-        CompressionAlgorithm::Zstd => decompress_zstd(input, declared_output_size, limits)?,
+        CompressionAlgorithm::None if dictionary.is_empty() => input.to_vec(),
+        CompressionAlgorithm::None => return Err(CompressionError::InvalidDictionary),
+        CompressionAlgorithm::Zstd => {
+            decompress_zstd(input, dictionary, declared_output_size, limits)?
+        }
     };
     let actual = usize_to_u64(output.len())?;
     if actual != declared_output_size {
@@ -245,12 +346,36 @@ pub fn decompress_stream(
     declared_output_size: u64,
     limits: &SecurityLimits,
 ) -> Result<CompressionStats, CompressionError> {
+    decompress_stream_with_dictionary(
+        input,
+        output,
+        CompressionMethod::new(algorithm),
+        declared_compressed_size,
+        declared_output_size,
+        limits,
+    )
+}
+
+/// Decompresses an exact stream with an optional embedded dictionary.
+///
+/// # Errors
+///
+/// Returns [`CompressionError`] for invalid dictionary use or the bounded
+/// streaming failures documented by [`decompress_stream`].
+pub fn decompress_stream_with_dictionary(
+    input: &mut impl io::Read,
+    output: &mut impl io::Write,
+    method: CompressionMethod<'_>,
+    declared_compressed_size: u64,
+    declared_output_size: u64,
+    limits: &SecurityLimits,
+) -> Result<CompressionStats, CompressionError> {
     enforce_compressed_limit(declared_compressed_size, limits)?;
     enforce_output_limit(declared_output_size, limits)?;
     enforce_ratio(declared_compressed_size, declared_output_size, limits)?;
     let mut limited = LimitedReader::new(input, declared_compressed_size);
-    let output_bytes = match algorithm {
-        CompressionAlgorithm::None => {
+    let output_bytes = match method.algorithm {
+        CompressionAlgorithm::None if method.dictionary.is_empty() => {
             if declared_compressed_size != declared_output_size {
                 return Err(CompressionError::SizeMismatch {
                     expected: declared_output_size,
@@ -260,9 +385,14 @@ pub fn decompress_stream(
             copy_declared(&mut limited, output, declared_output_size)?;
             declared_output_size
         }
-        CompressionAlgorithm::Zstd => {
-            decompress_zstd_stream(&mut limited, output, declared_output_size, limits)?
-        }
+        CompressionAlgorithm::None => return Err(CompressionError::InvalidDictionary),
+        CompressionAlgorithm::Zstd => decompress_zstd_stream(
+            &mut limited,
+            output,
+            method.dictionary,
+            declared_output_size,
+            limits,
+        )?,
     };
     if limited.remaining != 0 {
         return Err(CompressionError::InvalidStream);
@@ -273,21 +403,65 @@ pub fn decompress_stream(
     })
 }
 
+/// Trains a deterministic Zstandard dictionary from caller-ordered samples.
+///
+/// Dictionary training is intended for a family of similar small inputs. A
+/// container must still compare `dictionary length + compressed length`
+/// against ordinary compression before retaining the result.
+///
+/// # Errors
+///
+/// Returns [`CompressionError::InvalidDictionary`] when samples are
+/// insufficient or unsuitable, and [`CompressionError::UnsupportedEncoder`]
+/// on WebAssembly.
 #[cfg(not(target_arch = "wasm32"))]
-fn compress_zstd(input: &[u8], profile: CompressionProfile) -> Result<Vec<u8>, CompressionError> {
+pub fn train_dictionary<S: AsRef<[u8]>>(
+    samples: &[S],
+    maximum_size: usize,
+) -> Result<Vec<u8>, CompressionError> {
+    if samples.len() < 2 || maximum_size < 256 {
+        return Err(CompressionError::InvalidDictionary);
+    }
+    zstd::dict::from_samples(samples, maximum_size).map_err(|_| CompressionError::InvalidDictionary)
+}
+
+/// Reports that native dictionary training is unavailable on WebAssembly.
+///
+/// # Errors
+///
+/// Always returns [`CompressionError::UnsupportedEncoder`].
+#[cfg(target_arch = "wasm32")]
+pub fn train_dictionary<S: AsRef<[u8]>>(
+    _samples: &[S],
+    _maximum_size: usize,
+) -> Result<Vec<u8>, CompressionError> {
+    Err(CompressionError::UnsupportedEncoder)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn compress_zstd(
+    input: &[u8],
+    profile: CompressionProfile,
+    dictionary: &[u8],
+) -> Result<Vec<u8>, CompressionError> {
     let mut output = Vec::new();
     let mut source = input;
     compress_zstd_stream(
         &mut source,
         &mut output,
         profile,
+        dictionary,
         usize_to_u64(input.len())?,
     )?;
     Ok(output)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn compress_zstd(_input: &[u8], _profile: CompressionProfile) -> Result<Vec<u8>, CompressionError> {
+fn compress_zstd(
+    _input: &[u8],
+    _profile: CompressionProfile,
+    _dictionary: &[u8],
+) -> Result<Vec<u8>, CompressionError> {
     Err(CompressionError::UnsupportedEncoder)
 }
 
@@ -296,10 +470,12 @@ fn compress_zstd_stream(
     input: &mut impl io::Read,
     output: &mut impl io::Write,
     profile: CompressionProfile,
+    dictionary: &[u8],
     declared_input_size: u64,
 ) -> Result<(), CompressionError> {
-    let mut encoder = zstd::stream::write::Encoder::new(output, profile.level())
-        .map_err(|_| CompressionError::CompressionFailed)?;
+    let mut encoder =
+        zstd::stream::write::Encoder::with_dictionary(output, profile.level(), dictionary)
+            .map_err(|_| CompressionError::CompressionFailed)?;
     encoder
         .include_checksum(false)
         .map_err(|_| CompressionError::CompressionFailed)?;
@@ -330,6 +506,7 @@ fn compress_zstd_stream(
     _input: &mut impl io::Read,
     _output: &mut impl io::Write,
     _profile: CompressionProfile,
+    _dictionary: &[u8],
     _declared_input_size: u64,
 ) -> Result<(), CompressionError> {
     Err(CompressionError::UnsupportedEncoder)
@@ -338,22 +515,23 @@ fn compress_zstd_stream(
 #[cfg(not(target_arch = "wasm32"))]
 fn decompress_zstd(
     input: &[u8],
+    dictionary: &[u8],
     declared_output_size: u64,
     limits: &SecurityLimits,
 ) -> Result<Vec<u8>, CompressionError> {
-    let mut decoder =
-        zstd::stream::read::Decoder::new(input).map_err(|_| CompressionError::InvalidStream)?;
+    let mut decoder = zstd::stream::read::Decoder::with_dictionary(input, dictionary)
+        .map_err(|_| CompressionError::InvalidStream)?;
     read_bounded(&mut decoder, declared_output_size, limits)
 }
 
 #[cfg(target_arch = "wasm32")]
 fn decompress_zstd(
     input: &[u8],
+    dictionary: &[u8],
     declared_output_size: u64,
     limits: &SecurityLimits,
 ) -> Result<Vec<u8>, CompressionError> {
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(input)
-        .map_err(|_| CompressionError::InvalidStream)?;
+    let mut decoder = wasm_decoder(input, dictionary)?;
     read_bounded(&mut decoder, declared_output_size, limits)
 }
 
@@ -361,11 +539,13 @@ fn decompress_zstd(
 fn decompress_zstd_stream(
     input: &mut impl io::Read,
     output: &mut impl io::Write,
+    dictionary: &[u8],
     declared_output_size: u64,
     limits: &SecurityLimits,
 ) -> Result<u64, CompressionError> {
-    let mut decoder =
-        zstd::stream::read::Decoder::new(input).map_err(|_| CompressionError::InvalidStream)?;
+    let buffered = io::BufReader::new(input);
+    let mut decoder = zstd::stream::read::Decoder::with_dictionary(buffered, dictionary)
+        .map_err(|_| CompressionError::InvalidStream)?;
     copy_decoded(&mut decoder, output, declared_output_size, limits)
 }
 
@@ -373,12 +553,34 @@ fn decompress_zstd_stream(
 fn decompress_zstd_stream(
     input: &mut impl io::Read,
     output: &mut impl io::Write,
+    dictionary: &[u8],
     declared_output_size: u64,
     limits: &SecurityLimits,
 ) -> Result<u64, CompressionError> {
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(input)
-        .map_err(|_| CompressionError::InvalidStream)?;
+    let mut decoder = wasm_decoder(input, dictionary)?;
     copy_decoded(&mut decoder, output, declared_output_size, limits)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_decoder<Reader: io::Read>(
+    input: Reader,
+    dictionary: &[u8],
+) -> Result<
+    ruzstd::decoding::StreamingDecoder<Reader, ruzstd::decoding::FrameDecoder>,
+    CompressionError,
+> {
+    if dictionary.is_empty() {
+        return ruzstd::decoding::StreamingDecoder::new(input)
+            .map_err(|_| CompressionError::InvalidStream);
+    }
+    let dictionary = ruzstd::decoding::Dictionary::decode_dict(dictionary)
+        .map_err(|_| CompressionError::InvalidDictionary)?;
+    let mut decoder = ruzstd::decoding::FrameDecoder::new();
+    decoder
+        .add_dict(dictionary)
+        .map_err(|_| CompressionError::InvalidDictionary)?;
+    ruzstd::decoding::StreamingDecoder::new_with_decoder(input, decoder)
+        .map_err(|_| CompressionError::InvalidStream)
 }
 
 fn read_bounded(
@@ -607,8 +809,10 @@ mod tests {
     use rebyte_format::{CompressionAlgorithm, SecurityLimits};
 
     use super::{
-        CompressionError, CompressionProfile, compress, compress_stream, compress_with_profile,
-        decompress, decompress_stream,
+        CompressionError, CompressionMethod, CompressionProfile, compress, compress_stream,
+        compress_stream_with_dictionary, compress_with_dictionary, compress_with_profile,
+        decompress, decompress_stream, decompress_stream_with_dictionary,
+        decompress_with_dictionary, train_dictionary,
     };
 
     #[test]
@@ -734,6 +938,63 @@ mod tests {
         )?;
         assert_eq!(decoded.output_bytes, length);
         assert_eq!(output, input);
+        Ok(())
+    }
+
+    #[test]
+    fn trained_dictionary_is_deterministic_and_round_trips() -> Result<(), CompressionError> {
+        let samples: Vec<_> = (0..1_000)
+            .map(|index| {
+                format!(
+                    "{{\"kind\":\"audit\",\"index\":{index},\"service\":\"rebyte\",\"status\":\"ok\"}}\n"
+                )
+                .into_bytes()
+            })
+            .collect();
+        let first = train_dictionary(&samples, 8 * 1_024)?;
+        let second = train_dictionary(&samples, 8 * 1_024)?;
+        assert_eq!(first, second);
+        let input = samples.concat();
+        let length = u64::try_from(input.len()).map_err(|_| CompressionError::LengthOverflow)?;
+        let compressed = compress_with_dictionary(
+            &input,
+            CompressionAlgorithm::Zstd,
+            CompressionProfile::Balanced,
+            &first,
+            &SecurityLimits::SIMPLE_ARTIFACT,
+        )?;
+        assert_eq!(
+            decompress_with_dictionary(
+                &compressed,
+                CompressionAlgorithm::Zstd,
+                &first,
+                length,
+                &SecurityLimits::SIMPLE_ARTIFACT,
+            )?,
+            input
+        );
+
+        let mut source = Cursor::new(&input);
+        let mut streamed = Vec::new();
+        let encoded = compress_stream_with_dictionary(
+            &mut source,
+            &mut streamed,
+            CompressionMethod::zstd_with_dictionary(&first),
+            CompressionProfile::Balanced,
+            length,
+            &SecurityLimits::SIMPLE_ARTIFACT,
+        )?;
+        let mut compressed_source = Cursor::new(streamed);
+        let mut restored = Vec::new();
+        decompress_stream_with_dictionary(
+            &mut compressed_source,
+            &mut restored,
+            CompressionMethod::zstd_with_dictionary(&first),
+            encoded.output_bytes,
+            length,
+            &SecurityLimits::SIMPLE_ARTIFACT,
+        )?;
+        assert_eq!(restored, input);
         Ok(())
     }
 

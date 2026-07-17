@@ -27,7 +27,7 @@ blake3 = { version = "1.8", default-features = false }
 chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 subtle = { version = "2.6", default-features = false }
 ruzstd = { version = "0.8", default-features = false, features = ["std"] }
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.13", default-features = false, features = ["zdict_builder"] }
 ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc", "zeroize"] }
 cap-std = "4.0"
 cap-fs-ext = "4.0"
