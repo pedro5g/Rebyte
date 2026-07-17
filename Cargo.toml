@@ -7,6 +7,7 @@ members = [
     "crates/rebyte-compression",
     "crates/rebyte-signature",
     "crates/rebyte-pack",
+    "crates/rebyte-verify",
     "crates/rebyte-core",
     "crates/rebyte-cli",
     "xtask",

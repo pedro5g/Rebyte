@@ -1,6 +1,6 @@
 [package]
-name = "rebyte-core"
-description = "Stable facade for packing, verifying and applying Rebyte capsules"
+name = "rebyte-verify"
+description = "Typestate verification pipeline for Rebyte capsules"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,15 +8,18 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
-keywords = ["artifact", "capsule", "security"]
-categories = ["filesystem", "encoding"]
+publish = false
 
 [dependencies]
+rebyte-codec = { path = "../rebyte-codec", version = "0.1.0" }
+rebyte-compression = { path = "../rebyte-compression", version = "0.1.0" }
 rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+rebyte-integrity = { path = "../rebyte-integrity", version = "0.1.0" }
 rebyte-pack = { path = "../rebyte-pack", version = "0.1.0" }
 rebyte-signature = { path = "../rebyte-signature", version = "0.1.0" }
-rebyte-verify = { path = "../rebyte-verify", version = "0.1.0" }
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
 
 [lints]
 workspace = true

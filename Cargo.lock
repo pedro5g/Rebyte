@@ -296,6 +296,9 @@ name = "rebyte-core"
 version = "0.1.0"
 dependencies = [
  "rebyte-format",
+ "rebyte-pack",
+ "rebyte-signature",
+ "rebyte-verify",
 ]
 
 [[package]]
@@ -328,6 +331,19 @@ dependencies = [
  "ed25519-dalek",
  "rebyte-format",
  "rebyte-integrity",
+]
+
+[[package]]
+name = "rebyte-verify"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "rebyte-codec",
+ "rebyte-compression",
+ "rebyte-format",
+ "rebyte-integrity",
+ "rebyte-pack",
+ "rebyte-signature",
 ]
 
 [[package]]

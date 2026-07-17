@@ -15,3 +15,4 @@ and releases follow Semantic Versioning.
 - Bounded native and WebAssembly Zstandard decompression.
 - Ed25519 verification with explicit publisher channel and key status policy.
 - Deterministic artifact packager with canonical ordering and file digests.
+- Typestate signing and verification pipeline with byte-exact reconstruction.

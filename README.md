@@ -58,6 +58,12 @@ are rejected.
 files by canonical UTF-8 path bytes, rejects duplicates, builds contiguous
 offsets, hashes each file and produces deterministic unsigned capsule material.
 
+`rebyte-verify` makes trust transitions explicit in its types. The complete
+pipeline is `Unverified → StructurallyValid → SignatureVerified →
+PayloadVerified → FullyVerified`; only the last state exposes reconstructed
+files to future diff and apply crates. `rebyte-core` re-exports the stable pack,
+sign and verify facade.
+
 ## License
 
 Licensed under either Apache License, Version 2.0 or the MIT license, at your
