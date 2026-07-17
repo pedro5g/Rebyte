@@ -882,9 +882,13 @@ fn validate_journal(journal: &Journal) -> Result<(), ApplyError> {
 }
 
 fn cleanup_transaction(transactions: &Dir, id: &str) -> Result<(), ApplyError> {
-    transactions
-        .remove_dir_all(id)
-        .map_err(|error| ApplyError::Io(error.kind()))?;
+    match transactions.remove_dir_all(id) {
+        Ok(()) => {}
+        // Cleanup is intentionally idempotent. On Windows, recursive removal
+        // can report NotFound after the last directory entry disappeared.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ApplyError::Io(error.kind())),
+    }
     sync_directory(transactions)
 }
 
@@ -1132,6 +1136,20 @@ mod tests {
             b"concurrent change\n"
         );
         assert!(!directory.path().join("nested/created.bin").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_cleanup_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let root = super::open_root(directory.path())?;
+        let Some(transactions) = super::open_transactions(&root, true)? else {
+            return Err("transaction directory was not created".into());
+        };
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+
+        super::cleanup_transaction(&transactions, &transaction_id)?;
+        super::cleanup_transaction(&transactions, &transaction_id)?;
         Ok(())
     }
 
