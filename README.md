@@ -64,16 +64,37 @@ PayloadVerified → FullyVerified`; only the last state exposes reconstructed
 files to future diff and apply crates. `rebyte-core` re-exports the stable pack,
 sign and verify facade.
 
-The CLI currently provides bounded `inspect`, full `verify`, capability-confined
-`diff`, `doctor` and shell `completions`. Input may be an `rb1_` token, `-` for
-stdin, or `--file artifact.rbc`. The bundled development public key is rejected
-unless `--trust-channel development` is explicit.
+The CLI provides bounded `inspect`, full `verify`, capability-confined `diff`
+and `apply`, transaction recovery, `doctor` and shell `completions`. Input may
+be an `rb1_` token, `-` for stdin, or `--file artifact.rbc`. The bundled
+development public key is rejected unless `--trust-channel development` is
+explicit.
+
+```console
+rebyte verify --file release.rbc
+rebyte apply --file release.rbc --root ./app --dry-run
+rebyte apply --file release.rbc --root ./app
+rebyte apply --file release.rbc --root ./app --yes --backup
+rebyte transactions --root ./app
+rebyte resume TRANSACTION_ID --root ./app
+rebyte rollback TRANSACTION_ID --root ./app
+```
+
+Interactive application defaults to no. `--yes` bypasses only the prompt and
+never signature, trust, digest, limit, path or precondition checks. `--dry-run`
+performs complete verification and diff without creating the Rebyte control
+directory. Stable JSON is available through `--json`.
 
 `rebyte-apply` accepts only `FullyVerifiedCapsule`, stages and re-hashes every
 file, snapshots target preconditions, rejects symlinks, journals each state and
 uses same-filesystem atomic renames. A multi-file operation may be partially
 visible during a crash, but retained staging and backups support resume or
 rollback; global multi-file atomicity is not claimed.
+
+CLI exit codes are `0` for success/cancellation, `1` generic I/O, `2` malformed
+input, `3` invalid signature, `4` unknown key, `5` digest/payload failure, `6`
+unsupported protocol, `7` trust-policy rejection, `8` unsafe filesystem path,
+`9` target/transaction conflict and `10` journal or transaction failure.
 
 ## License
 

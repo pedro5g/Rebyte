@@ -600,13 +600,16 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clap_complete",
+ "ed25519-dalek",
  "rebyte-codec",
  "rebyte-core",
  "rebyte-format",
+ "rebyte-pack",
  "rebyte-signature",
  "rebyte-verify",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

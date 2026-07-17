@@ -27,5 +27,10 @@ rebyte-verify = { path = "../rebyte-verify", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+ed25519-dalek.workspace = true
+rebyte-pack = { path = "../rebyte-pack", version = "0.1.0" }
+tempfile.workspace = true
+
 [lints]
 workspace = true

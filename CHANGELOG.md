@@ -18,3 +18,4 @@ and releases follow Semantic Versioning.
 - Typestate signing and verification pipeline with byte-exact reconstruction.
 - Read-only `inspect`, `verify`, `diff`, `doctor` and completion CLI commands.
 - Capability-confined, journaled and recoverable filesystem transactions.
+- Confirmed/dry-run capsule application and transaction recovery CLI commands.

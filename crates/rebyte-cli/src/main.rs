@@ -4,13 +4,17 @@
 
 use std::fmt;
 use std::fs;
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
-use rebyte_core::{ChangeKind, DiffReport, FullyVerifiedCapsule, diff_capsule};
+use rebyte_core::{
+    ApplyError, ApplyOptions, ApplyReport, ChangeKind, DiffReport, FullyVerifiedCapsule,
+    TransactionState, TransactionSummary, apply_transaction, diff_capsule, list_transactions,
+    resume_transaction, rollback_transaction,
+};
 use rebyte_format::{CompressionAlgorithm, Digest32, KeyId, SecurityLimits};
 use rebyte_signature::{
     KeyStatus, SignatureError, TrustChannel, TrustedKeyring, TrustedPublicKey, VerificationPolicy,
@@ -27,6 +31,9 @@ const EXIT_UNKNOWN_KEY: u8 = 4;
 const EXIT_DIGEST: u8 = 5;
 const EXIT_VERSION: u8 = 6;
 const EXIT_POLICY: u8 = 7;
+const EXIT_UNSAFE_PATH: u8 = 8;
+const EXIT_CONFLICT: u8 = 9;
+const EXIT_TRANSACTION: u8 = 10;
 const DEVELOPMENT_PUBLIC_KEY: [u8; 32] = [
     88, 147, 102, 4, 171, 218, 17, 43, 201, 73, 51, 86, 156, 130, 248, 208, 204, 13, 223, 146, 163,
     248, 50, 159, 47, 68, 143, 127, 72, 74, 89, 76,
@@ -52,6 +59,14 @@ enum Commands {
     Verify(ReadCommand),
     /// Compare a verified capsule with a local root without writing.
     Diff(DiffCommand),
+    /// Verify, preview and safely apply a capsule to a local root.
+    Apply(ApplyCommand),
+    /// List retained or interrupted filesystem transactions.
+    Transactions(RootCommand),
+    /// Resume an interrupted transaction from verified staged bytes.
+    Resume(RecoveryCommand),
+    /// Restore the original state from an interrupted or retained transaction.
+    Rollback(RecoveryCommand),
     /// Report local Rebyte capabilities and trust configuration.
     Doctor {
         /// Emit stable JSON instead of terminal text.
@@ -83,6 +98,57 @@ struct DiffCommand {
     input: InputArgs,
     #[command(flatten)]
     trust: TrustArgs,
+    /// Local application root.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Emit stable JSON instead of terminal text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ApplyCommand {
+    #[command(flatten)]
+    input: InputArgs,
+    #[command(flatten)]
+    trust: TrustArgs,
+    /// Local application root.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    #[command(flatten)]
+    mode: ApplyModeArgs,
+    /// Emit stable JSON instead of terminal text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ApplyModeArgs {
+    /// Verify and preview without modifying the filesystem.
+    #[arg(long)]
+    dry_run: bool,
+    /// Apply without the interactive confirmation prompt.
+    #[arg(long)]
+    yes: bool,
+    /// Retain the committed journal and original-file backups.
+    #[arg(long)]
+    backup: bool,
+}
+
+#[derive(Debug, Args)]
+struct RootCommand {
+    /// Local application root.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Emit stable JSON instead of terminal text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct RecoveryCommand {
+    /// UUID of a transaction reported by `rebyte transactions`.
+    transaction_id: String,
     /// Local application root.
     #[arg(long, default_value = ".")]
     root: PathBuf,
@@ -129,6 +195,10 @@ fn run() -> Result<(), CliError> {
         Commands::Inspect(command) => inspect(&command),
         Commands::Verify(command) => verify(&command),
         Commands::Diff(command) => diff(&command),
+        Commands::Apply(command) => apply(&command),
+        Commands::Transactions(command) => transactions(&command),
+        Commands::Resume(command) => resume(&command),
+        Commands::Rollback(command) => rollback(&command),
         Commands::Doctor { json } => doctor(json),
         Commands::Completions { shell } => {
             generate(shell, &mut Cli::command(), "rebyte", &mut io::stdout());
@@ -185,6 +255,128 @@ fn diff(command: &DiffCommand) -> Result<(), CliError> {
     }
 }
 
+fn apply(command: &ApplyCommand) -> Result<(), CliError> {
+    let input = read_input(&command.input)?;
+    let policy = trust_policy(&command.trust);
+    let keyring = development_keyring()?;
+    let verified = verify_capsule(input.as_capsule_input(), &policy, &keyring)
+        .map_err(CliError::verification)?;
+    let changes = diff_capsule(&verified, &command.root)
+        .map_err(|error| CliError::new(EXIT_TRANSACTION, error.to_string()))?;
+
+    if command.mode.dry_run {
+        if command.json {
+            return write_json(&ApplyPreviewJson::from_report(&changes));
+        }
+        println!("Dry run: capsule is fully verified; no files will be written.");
+        print_diff(&changes);
+        return Ok(());
+    }
+    if !command.mode.yes && !confirm_apply(&changes, !command.json)? {
+        if command.json {
+            return write_json(&ApplyCancelledJson {
+                schema_version: 1,
+                applied: false,
+                reason: "cancelled",
+            });
+        }
+        println!("Application cancelled; no files were written.");
+        return Ok(());
+    }
+    let report = apply_transaction(
+        &verified,
+        &command.root,
+        &ApplyOptions {
+            retain_backup: command.mode.backup,
+        },
+    )
+    .map_err(CliError::apply)?;
+    print_apply_result(&report, command.json)
+}
+
+fn transactions(command: &RootCommand) -> Result<(), CliError> {
+    let summaries = list_transactions(&command.root).map_err(CliError::apply)?;
+    let report = TransactionsJson::from_summaries(&summaries);
+    if command.json {
+        write_json(&report)
+    } else {
+        if summaries.is_empty() {
+            println!("No retained or interrupted transactions.");
+        }
+        for transaction in summaries {
+            println!(
+                "{}  {}  {}/{} files{}",
+                transaction.id,
+                transaction_state_name(transaction.state),
+                transaction.committed,
+                transaction.operations,
+                if transaction.retained {
+                    "  retained"
+                } else {
+                    ""
+                }
+            );
+        }
+        Ok(())
+    }
+}
+
+fn resume(command: &RecoveryCommand) -> Result<(), CliError> {
+    let report =
+        resume_transaction(&command.root, &command.transaction_id).map_err(CliError::apply)?;
+    print_apply_result(&report, command.json)
+}
+
+fn rollback(command: &RecoveryCommand) -> Result<(), CliError> {
+    rollback_transaction(&command.root, &command.transaction_id).map_err(CliError::apply)?;
+    let report = RecoveryJson {
+        schema_version: 1,
+        transaction_id: command.transaction_id.clone(),
+        state: "rolledBack",
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("Rolled back transaction {}.", command.transaction_id);
+        Ok(())
+    }
+}
+
+fn confirm_apply(report: &DiffReport, print_preview: bool) -> Result<bool, CliError> {
+    if print_preview {
+        print_diff(report);
+    }
+    eprint!("Apply these verified changes? [y/N] ");
+    io::stderr()
+        .flush()
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot flush prompt: {error}")))?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).map_err(|error| {
+        CliError::new(EXIT_GENERIC, format!("cannot read confirmation: {error}"))
+    })?;
+    Ok(is_affirmative(&answer))
+}
+
+fn is_affirmative(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn print_apply_result(report: &ApplyReport, json: bool) -> Result<(), CliError> {
+    let value = ApplyReportJson::from_report(report);
+    if json {
+        write_json(&value)
+    } else {
+        println!(
+            "Applied {} verified files ({} bytes) in transaction {}.",
+            report.files_written, report.bytes_written, report.transaction_id
+        );
+        if let Some(path) = &report.retained_backup {
+            println!("Backup retained at {}.", path.display());
+        }
+        Ok(())
+    }
+}
+
 fn doctor(json: bool) -> Result<(), CliError> {
     let keyring = development_keyring()?;
     let report = DoctorReport {
@@ -196,7 +388,7 @@ fn doctor(json: bool) -> Result<(), CliError> {
         production_keys: 0,
         development_keys: u32::try_from(keyring.len())
             .map_err(|_| CliError::new(EXIT_GENERIC, "key count overflow"))?,
-        filesystem_apply_available: false,
+        filesystem_apply_available: true,
     };
     if json {
         write_json(&report)
@@ -212,7 +404,7 @@ fn doctor(json: bool) -> Result<(), CliError> {
             "Development keys: {} (explicit opt-in required)",
             report.development_keys
         );
-        println!("Filesystem apply: not implemented in this build phase");
+        println!("Filesystem apply: available (confirmation required by default)");
         Ok(())
     }
 }
@@ -447,6 +639,106 @@ struct DiffEntryJson {
     unified_text: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyPreviewJson {
+    schema_version: u16,
+    dry_run: bool,
+    verified: bool,
+    diff: DiffJson,
+}
+
+impl ApplyPreviewJson {
+    fn from_report(report: &DiffReport) -> Self {
+        Self {
+            schema_version: 1,
+            dry_run: true,
+            verified: true,
+            diff: DiffJson::from_report(report),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyCancelledJson {
+    schema_version: u16,
+    applied: bool,
+    reason: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyReportJson {
+    schema_version: u16,
+    applied: bool,
+    transaction_id: String,
+    files_written: usize,
+    bytes_written: u64,
+    retained_backup: Option<String>,
+}
+
+impl ApplyReportJson {
+    fn from_report(report: &ApplyReport) -> Self {
+        Self {
+            schema_version: 1,
+            applied: true,
+            transaction_id: report.transaction_id.clone(),
+            files_written: report.files_written,
+            bytes_written: report.bytes_written,
+            retained_backup: report
+                .retained_backup
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransactionsJson {
+    schema_version: u16,
+    transactions: Vec<TransactionJson>,
+}
+
+impl TransactionsJson {
+    fn from_summaries(summaries: &[TransactionSummary]) -> Self {
+        Self {
+            schema_version: 1,
+            transactions: summaries
+                .iter()
+                .map(|transaction| TransactionJson {
+                    id: transaction.id.clone(),
+                    state: transaction_state_name(transaction.state),
+                    operations: transaction.operations,
+                    committed: transaction.committed,
+                    capsule_digest: encode_digest(&transaction.capsule_digest),
+                    retained: transaction.retained,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransactionJson {
+    id: String,
+    state: &'static str,
+    operations: usize,
+    committed: usize,
+    capsule_digest: String,
+    retained: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryJson {
+    schema_version: u16,
+    transaction_id: String,
+    state: &'static str,
+}
+
 fn print_inspection(report: &InspectionReport) {
     println!("Rebyte Capsule (structurally bounded, metadata may be untrusted)");
     println!("Protocol: RAP v{}", report.protocol_version);
@@ -524,6 +816,18 @@ const fn change_name(value: ChangeKind) -> &'static str {
         ChangeKind::UpdateText => "UPDATE",
         ChangeKind::UpdateBinary => "UPDATE-BINARY",
         _ => "UNKNOWN",
+    }
+}
+
+const fn transaction_state_name(value: TransactionState) -> &'static str {
+    match value {
+        TransactionState::Prepared => "prepared",
+        TransactionState::Staged => "staged",
+        TransactionState::Committing => "committing",
+        TransactionState::Committed => "committed",
+        TransactionState::RollingBack => "rollingBack",
+        TransactionState::RolledBack => "rolledBack",
+        _ => "unknown",
     }
 }
 
@@ -607,6 +911,17 @@ impl CliError {
     fn signature(error: SignatureError) -> Self {
         Self::new(EXIT_POLICY, error.to_string())
     }
+
+    fn apply(error: ApplyError) -> Self {
+        let exit_code = match error {
+            ApplyError::Symlink | ApplyError::NotRegularFile => EXIT_UNSAFE_PATH,
+            ApplyError::IncompleteTransaction
+            | ApplyError::Conflict
+            | ApplyError::TransactionFinished => EXIT_CONFLICT,
+            _ => EXIT_TRANSACTION,
+        };
+        Self::new(exit_code, error.to_string())
+    }
 }
 
 impl fmt::Display for CliError {
@@ -619,7 +934,7 @@ impl std::error::Error for CliError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_hex, sanitize_terminal};
+    use super::{encode_hex, is_affirmative, sanitize_terminal};
 
     #[test]
     fn terminal_controls_are_escaped_but_layout_is_preserved() {
@@ -632,5 +947,13 @@ mod tests {
     #[test]
     fn lower_hex_is_stable() {
         assert_eq!(encode_hex(&[0, 0xab, 0xff]), "00abff");
+    }
+
+    #[test]
+    fn confirmation_is_explicit_and_case_insensitive() {
+        assert!(is_affirmative("yes\n"));
+        assert!(is_affirmative(" Y "));
+        assert!(!is_affirmative(""));
+        assert!(!is_affirmative("maybe"));
     }
 }
