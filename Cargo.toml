@@ -12,6 +12,7 @@ members = [
     "crates/rebyte-diff",
     "crates/rebyte-apply",
     "crates/rebyte-wasm",
+    "crates/rebyte-signer",
     "crates/rebyte-core",
     "crates/rebyte-cli",
     "xtask",
@@ -36,6 +37,7 @@ uuid = { version = "1.18", features = ["v4"] }
 proptest = "1.9"
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
+zeroize = "1.8"
 
 [workspace.package]
 version = "0.1.0"

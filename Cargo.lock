@@ -814,6 +814,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebyte-signer"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "rebyte-integrity",
+ "rebyte-signature",
+ "zeroize",
+]
+
+[[package]]
 name = "rebyte-verify"
 version = "0.1.0"
 dependencies = [

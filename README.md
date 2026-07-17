@@ -42,6 +42,11 @@ Browser packing is deterministic and uncompressed; a trusted server must
 revalidate, choose production compression and sign it. The Wasm module contains
 no private key, trust decision, network access or filesystem API.
 
+`rebyte-signer` provides only development adapters. `DevelopmentSigner`
+requires an explicit 32-byte seed; `EnvironmentDevelopmentSigner` accepts that
+seed as unpadded Base64URL and zeroizes copied buffers. It is not a production
+KMS/HSM implementation, and no private-key fixture is compiled into the crate.
+
 Internal AI-assisted notes must stay below the ignored `.ai/` directory.
 
 The `rebyte-format` crate is `no_std + alloc` compatible and exposes only
