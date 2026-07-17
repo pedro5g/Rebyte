@@ -1,11 +1,13 @@
 # Rebyte Chain architecture
 
-Status: design draft for the next protocol family. Nothing in this document is
-accepted by Rebyte 1.2 or promised as a stable wire format.
+Status: Chain envelope v1 is implemented by `rebyte-chain`, `rebyte-core` and
+the `rebyte chain` CLI. The later signed event graph and interactive threshold
+opening described as roadmap are not implemented by envelope v1.
 
 Rebyte Chain is a local-first, self-custodied system for sharing byte-exact
-Rebyte artifacts with explicit cryptographic access policies. Its history is an
-append-only, signed Merkle directed acyclic graph (DAG). It is not a
+Rebyte artifacts with explicit cryptographic authorization and recipients. The
+implemented layer is an offline encrypted envelope. A later history layer may
+form an append-only, signed Merkle directed acyclic graph (DAG). Chain is not a
 cryptocurrency, public blockchain or global source of consensus.
 
 The design keeps four properties independent:
@@ -22,18 +24,19 @@ event log cannot prove that a remote recipient deleted plaintext.
 
 ## Product boundary
 
-The first Chain release is intended to provide:
+Chain envelope v1 provides:
 
-- any number of self-custodied identities and keys per user;
-- encrypted, portable key-bundle import and export;
-- one ciphertext shared with one or many recipients;
-- `1-of-N`, `T-of-N` and `N-of-N` access policies;
-- offline approval files bound to one capsule and one opening session;
-- an inspectable, tamper-evident history with deterministic fork and merge;
-- the existing byte-exact `.rba` artifact as the encrypted content;
-- native CLI and browser-safe WebAssembly APIs over the same codecs.
+- any number of independent self-custodied identities;
+- passphrase-encrypted portable `.rbk` private bundles;
+- self-signed public packages binding Ed25519 and X25519 keys;
+- unanimous `N-of-N` group formation proof;
+- configurable `T-of-N` authorization of each exact encrypted proposal;
+- one ciphertext shared with one or many explicitly listed recipients;
+- the existing byte-exact `.rba` file or directory artifact as content;
+- canonical binary `.rbe`, textual `rbe1_` and strict control documents;
+- native Rust and CLI APIs with no network dependency.
 
-It does not initially provide:
+Envelope v1 does not provide:
 
 - proof of work, mining, tokens or a globally replicated ledger;
 - a trusted global timestamp or total ordering of offline events;
@@ -42,7 +45,9 @@ It does not initially provide:
 - anonymity against traffic analysis, file-size analysis or a malicious
   application origin;
 - automatic semantic merging of file contents;
-- FROST, MLS, hardware enclaves or a network relay.
+- threshold approval at every open, threshold secret sharing, FROST, MLS,
+  hardware enclaves or a network relay;
+- the signed Merkle event graph or a Chain WebAssembly storage API.
 
 Semantic patches remain a separate, signed content type. They can later be
 carried inside a Chain envelope without giving the patch language authority to
@@ -71,18 +76,16 @@ keys is represented by an access policy.
 ### Key bundle
 
 An `.rbk` key bundle is a canonical, versioned document containing public
-identity data and encrypted private key material. A fresh random vault key
-encrypts the secrets with an AEAD. A passphrase-derived Argon2id key wraps the
-vault key. Parameters, salt, nonce, public identity and format version are
-authenticated as associated data. KDF profiles follow
-[RFC 9106](https://www.rfc-editor.org/rfc/rfc9106) and remain encoded in the
-bundle so that stronger future profiles can coexist.
+identity data and encrypted private seed material. Argon2id v1.3 derives the
+XChaCha20-Poly1305 key directly from the passphrase and a random salt. Version
+1 fixes 64 MiB, three iterations and one lane. Parameters, salt, nonce and the
+complete public identity are authenticated as associated data.
 
-Import MUST validate public/private correspondence, duplicate `KeyId` values,
-canonical encoding, algorithms, limits and KDF parameters before committing the
-bundle. Export MUST be exclusive by default, use restrictive permissions where
-the platform exposes them, synchronize the completed file and never print
-private material.
+Unlock validates public/private correspondence, canonical encoding,
+algorithms, limits and KDF parameters before returning an in-memory identity.
+CLI creation is exclusive, uses restrictive permissions where the platform
+exposes them, synchronizes the completed file and never prints private
+material.
 
 Losing every private bundle and recovery copy makes the encrypted data
 unrecoverable. Self-custody removes a central recovery authority; it does not
@@ -93,78 +96,123 @@ remove the need for verified offline backups.
 An `.rbe` Rebyte Encrypted Envelope contains:
 
 - fixed magic, protocol version, suite identifiers and strict limits;
-- a random envelope identifier;
+- the complete unanimously accepted group certificate;
 - the digest and length of one canonical inner `.rba` artifact;
-- a canonical access policy and its digest;
-- one encrypted recipient slot per policy member;
-- a chunked, authenticated ciphertext of the compressed artifact;
-- optional bounded display metadata;
-- the sender signing `header || policy || slots || ciphertext digest`.
+- one HPKE slot per explicitly authorized recipient;
+- one XChaCha20-Poly1305 ciphertext of the complete `.rba`;
+- `T` or more unique group-member approvals;
+- proposal and envelope identifiers committing every security field.
 
 The encoder generates a fresh random 256-bit content-encryption key (CEK) for
 every envelope. The artifact is encrypted once. Recipient slots encapsulate
 only CEK-related key material, so adding recipients does not duplicate a large
 payload.
 
-The candidate recipient construction is HPKE as specified by
+Recipient slots use HPKE as specified by
 [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180), using a registered X25519
-ciphersuite and the RFC test vectors. The exact suite and chunked payload AEAD
-remain unfrozen until dependency review, WebAssembly validation and immutable
-cross-language vectors are complete.
+ciphersuite: X25519-HKDF-SHA256, HKDF-SHA256 and ChaCha20-Poly1305 in Base
+mode. The payload uses XChaCha20-Poly1305. Suite identifiers reject algorithm
+substitution.
 
 Compression MUST finish before encryption. Ciphertext is intentionally
 incompressible, and compressed size can reveal information. Applications MUST
 not automatically expose secret-dependent compression to attacker-controlled
 plaintext in an interactive oracle.
 
-## Access policies
+## Group authorization and recipient access
 
-Chain v1 uses a flat, canonical policy:
+Chain envelope v1 has two intentionally independent sets:
 
 ```text
-Policy {
-    members: sorted unique SigningKeyId + EncryptionKeyId pairs
-    required: integer T
-    total: integer N
+Group {
+    members: sorted unique public identities
+    capsule_approval_threshold: T
+}
+
+Recipients {
+    identities: sorted unique public identities
 }
 ```
 
-`1 <= T <= N` is mandatory. `1-of-N` lets any listed recipient open the
-artifact. `N-of-N` requires everyone. An “80%” user choice is frozen as
-`T = ceil(80 * N / 100)` when the envelope is created; changing membership
-creates a new policy and envelope.
+Group formation is always unanimous. Each proposed member independently
+recomputes the same `GroupId` and signs `GroupId || MemberIdentityId` with the
+private Ed25519 key corresponding to its original public package. Substituting
+another private key invalidates the certificate.
 
-For `1-of-N`, every recipient slot wraps the same CEK. For `T-of-N`, the CEK is
-split into independently encrypted shares by a reviewed threshold secret
-sharing construction. Each member receives exactly one authenticated share.
-The capsule binds the member list, threshold, share index and encryption suite
-to the signed policy digest.
+`1 <= T <= N` is mandatory. For each capsule, `T` unique group members sign
+the exact `GroupId || ProposalId || MemberIdentityId`. The `ProposalId`
+commits the group certificate, inner artifact, complete recipient list, HPKE
+slots and ciphertext. Approvals cannot be replayed onto another proposal.
 
-An opening session has a fresh random `SessionId` and ephemeral encryption
-public key. A participant decrypts its share locally and creates a signed
-`.rbauth` approval that binds:
+Every recipient receives an HPKE wrapping of the same random CEK and can open
+independently after the envelope has been finalized. A group member is not
+automatically a recipient, and a recipient is not automatically allowed to
+approve. This distinction permits, for example, two release officers to
+authorize encrypted delivery to ten customer identities.
 
-```text
-EnvelopeId || PolicyDigest || SessionId || OpenerEphemeralKey || Expiry
-```
+If a product requires `T-of-N` cooperation at every open, the CEK must instead
+be split by a reviewed threshold secret-sharing construction and exchanged in
+a fresh, replay-resistant opening session. That protocol is not present in
+envelope v1. Signatures alone cannot enforce it, and Rebyte does not label
+capsule-finalization approvals as opening shares.
 
-The share is encrypted to the opener's ephemeral key. The opener reconstructs
-the CEK only after collecting `T` unique, valid approvals. Replayed approvals,
-duplicate members, approvals for another envelope or session, expired
-approvals and non-members are rejected.
-
-Once an authorized opener reconstructs the CEK or plaintext, software cannot
-force that person to forget it. Requiring fresh approval for every future open
-needs an online authority, trusted hardware, or participants who never release
-reusable key material; those are different deployment models.
-
-Independent signed approvals are the v1 threshold mechanism. FROST, specified
+FROST, specified
 by [RFC 9591](https://www.rfc-editor.org/rfc/rfc9591), can later make one
 threshold signature compact, but it requires purpose-built key shares,
 coordinated setup and two interactive signing rounds. It cannot safely turn an
 arbitrary collection of existing private keys into one group key.
 
+## Implemented flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Alice · group member
+    participant B as Bob · group member
+    participant C as Capsule coordinator
+    participant R as Recipient
+
+    C->>A: GroupProposal(GroupId, Alice, Bob, T=2)
+    C->>B: Same canonical GroupProposal
+    A->>A: Recompute GroupId and sign acceptance
+    B->>B: Recompute GroupId and sign acceptance
+    A-->>C: Alice GroupAcceptance
+    B-->>C: Bob GroupAcceptance
+    C->>C: Verify N-of-N and finalize GroupCertificate
+    C->>C: Verify .rba, encrypt once, HPKE-wrap CEK for R
+    C->>A: CapsuleProposal(ProposalId)
+    C->>B: Same canonical CapsuleProposal
+    A-->>C: Sign GroupId + ProposalId + AliceId
+    B-->>C: Sign GroupId + ProposalId + BobId
+    C->>C: Verify 2-of-2 and finalize .rbe
+    C-->>R: .rbe file or rbe1_ token
+    R->>R: Verify group, threshold, IDs and recipient slot
+    R->>R: HPKE unwrap CEK, AEAD decrypt, verify .rba
+    R->>R: Reconstruct exact file or directory
+```
+
+The data and authorization paths meet only in the finalized envelope:
+
+```mermaid
+flowchart LR
+    F[File or portable directory] --> A[Canonical .rba]
+    A --> E[XChaCha20-Poly1305<br/>one payload ciphertext]
+    K[Fresh random CEK] --> E
+    K --> H1[HPKE slot · recipient 1]
+    K --> H2[HPKE slot · recipient 2..N]
+
+    P[Public identities + threshold] --> G[Unanimous GroupCertificate]
+    G --> Q[Capsule ProposalId]
+    E --> Q
+    H1 --> Q
+    H2 --> Q
+    Q --> S[T unique Ed25519 approvals]
+    S --> R[Final .rbe / rbe1_]
+```
+
 ## Signed Merkle event graph
+
+The remainder of this section is roadmap, not an envelope v1 capability.
 
 Every state transition is a canonical event:
 
@@ -211,6 +259,9 @@ was correct, or that all peers agree on one canonical history.
 
 ## Local-first browser application
 
+This section is roadmap; the native envelope does not yet expose Chain private
+keys or persistence to WebAssembly.
+
 The web application is a static, installable PWA. After a verified initial
 load, a service worker may make the interface available offline. IndexedDB
 stores canonical encrypted objects, graph events, public contacts and encrypted
@@ -244,22 +295,25 @@ No plaintext reaches a destination until all applicable stages succeed:
 
 1. Decode the bounded, canonical envelope without allocating from untrusted
    lengths.
-2. Verify suite identifiers, structure, unique members, policy and ciphertext
-   digest.
-3. Verify the sender signature and local trust policy.
-4. Match a `1-of-N` recipient or validate `T` session-bound approvals.
-5. Decapsulate recipient material and reconstruct the CEK in secret memory.
-6. Authenticate and decrypt every chunk into same-filesystem staging.
-7. Decode the inner artifact and verify its root and per-file BLAKE3 digests.
-8. Show the effective destination, file list, overwrite decisions and policy.
-9. Reconstruct using the existing no-follow, journaled transaction engine.
-10. Verify written bytes, close handles and report a signed local event.
+2. Verify suite identifiers, strict ordering, unique identities and every
+   public identity proof.
+3. Recompute the `GroupId` and verify unanimous group formation.
+4. Recompute the `ProposalId` and verify at least `T` unique group approvals.
+5. Match the opener to one exact recipient slot.
+6. HPKE-decapsulate the CEK without exposing it in output or errors.
+7. Authenticate and decrypt the payload in bounded memory.
+8. Verify exact length and the domain-separated artifact digest.
+9. Decode the inner `.rba` and verify its root and per-file BLAKE3 digests.
+10. Reconstruct with the existing exclusive-output, no-symlink artifact
+    decoder.
 
-Failure at any stage deletes staging data and returns a typed, non-secret error.
-Authentication failures do not reveal which key, share or ciphertext field was
-closest to valid.
+Failure at any stage returns a typed, non-secret error and creates no output.
+Authentication failures do not reveal partial CEK or plaintext bytes.
 
 ## Revocation and rotation
+
+The rules below are roadmap for the signed event graph; envelope v1 has no
+key-status event or trusted online revocation check.
 
 Key status is an authenticated graph event and local trust decision:
 
@@ -277,55 +331,40 @@ security are a later problem. Rebyte SHOULD evaluate Messaging Layer Security,
 [RFC 9420](https://www.rfc-editor.org/rfc/rfc9420), rather than inventing a
 group ratchet.
 
-## Proposed CLI boundary
-
-Names are provisional and will not be exposed until the codecs and vectors are
-stable:
+## Implemented CLI boundary
 
 ```console
-rebyte identity generate --name "Pedro" --output pedro.rbk
-rebyte identity public pedro.rbk --output pedro.identity.json
-rebyte identity import pedro.rbk
-
-rebyte encrypt ./project \
-  --sender pedro.rbk \
-  --recipient ana.identity.json \
-  --recipient bruno.identity.json \
-  --threshold 1 \
-  --output project.rbe
-
-rebyte open project.rbe --identity ana.rbk --output ./project
-
-rebyte open request project.rbe --identity ana.rbk --output session.rbreq
-rebyte approve session.rbreq --identity bruno.rbk --output bruno.rbauth
-rebyte open project.rbe \
-  --identity ana.rbk \
-  --approval bruno.rbauth \
-  --output ./project
-
-rebyte chain inspect
-rebyte chain verify
-rebyte chain export --output history.rbchain
-rebyte chain merge history.rbchain
+rebyte chain identity generate|inspect
+rebyte chain group create|accept|finalize|inspect
+rebyte chain capsule create|approve|finalize|inspect|open
 ```
 
-Every mutation defaults to preview plus explicit confirmation. JSON output is
-versioned. Passphrases are read from an interactive terminal or protected file,
-not ordinary command-line arguments or environment variables.
+Every output is created exclusively and never replaces an existing path. JSON
+output is versioned. Passphrases are read from an interactive terminal or a
+protected file, not ordinary command-line arguments or environment variables.
+Run any level with `-h` for contextual options; the full reference is
+[docs/cli.md](cli.md).
 
 ## Implementation gates
 
-The feature progresses only through these reviewable gates:
+Completed gates:
 
-1. Freeze the threat model, canonical layouts, limits, suites and immutable
-   manual vectors.
-2. Add separate signing/encryption identities and encrypted `.rbk` bundles.
-3. Implement single-recipient HPKE and chunked authenticated `.rbe` payloads.
-4. Extend the same ciphertext to canonical `1-of-N` recipients.
-5. Add session-bound `T-of-N` approvals and adversarial share tests.
-6. Add the signed Merkle DAG, offline fork/merge and revocation semantics.
-7. Expose read-only WASM codecs, then an encrypted IndexedDB repository.
-8. Build the PWA only after native and WASM vectors match byte for byte.
+1. separate self-proving Ed25519/X25519 identities and encrypted `.rbk`;
+2. unanimous group formation bound to every original public identity;
+3. RFC 9180 HPKE recipient slots and authenticated payload encryption;
+4. one ciphertext for canonical multi-recipient delivery;
+5. exact-proposal `T-of-N` approvals with duplicate and replay rejection;
+6. native Rust facade, complete CLI workflow and end-to-end reconstruction;
+7. mutation, representative truncation, wrong-key, threshold and fuzz-harness
+   coverage.
+
+Remaining independent gates:
+
+1. independent cryptographic review and stable cross-language vectors;
+2. session-bound threshold opening with reviewed secret sharing;
+3. signed Merkle DAG, offline fork/merge and revocation semantics;
+4. read-only WASM codecs and encrypted IndexedDB repository;
+5. PWA only after native and WASM vectors match byte for byte.
 
 Each gate requires canonical round trips, mutation and truncation rejection,
 wrong-key indistinguishability, nonce-uniqueness checks, threshold boundary

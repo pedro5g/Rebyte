@@ -3,8 +3,9 @@
 Copyright (c) 2026 Pedro Martins (pedro5g)
 
 These examples show intended Rebyte deployment patterns. Rebyte transfers
-artifacts; it is not a package manager, remote executor or secret-distribution
-system.
+artifacts; it is not a package manager or remote executor. RAP capsules
+authenticate public artifacts, while Chain capsules additionally encrypt an
+artifact for explicit self-custodied recipient identities.
 
 ## One-file sharing without a trust decision
 
@@ -71,6 +72,66 @@ rebyte apply --file site.rbc --trusted-key site.public.json \
 rebyte apply --file site.rbc --trusted-key site.public.json \
   --root /srv/www --yes --backup --json > result.json
 ```
+
+## Two-person encrypted release approval
+
+Alice and Bob first form a group with threshold `2`; each must independently
+accept the same `GroupId`. A recipient named Customer shares only
+`customer.public.json`.
+
+```console
+rebyte chain group create --name "Release officers" \
+  --member alice.public.json --member bob.public.json \
+  --threshold 2 --output officers.proposal.json
+
+rebyte chain group accept officers.proposal.json \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --output alice.group-acceptance.json
+rebyte chain group accept officers.proposal.json \
+  --private-key bob.rbk --passphrase-file bob.passphrase \
+  --output bob.group-acceptance.json
+
+rebyte chain group finalize officers.proposal.json \
+  --acceptance alice.group-acceptance.json \
+  --acceptance bob.group-acceptance.json \
+  --output officers.group.json
+```
+
+The coordinator encodes the exact directory, encrypts it for Customer and
+collects both proposal-bound approvals:
+
+```console
+rebyte encode ./confidential-release --format binary --output release.rba
+rebyte chain capsule create --group officers.group.json \
+  --artifact release.rba --recipient customer.public.json \
+  --output release.proposal.rbep
+
+rebyte chain capsule approve release.proposal.rbep \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --output alice.release-approval.json
+rebyte chain capsule approve release.proposal.rbep \
+  --private-key bob.rbk --passphrase-file bob.passphrase \
+  --output bob.release-approval.json
+
+rebyte chain capsule finalize release.proposal.rbep \
+  --approval alice.release-approval.json \
+  --approval bob.release-approval.json \
+  --output confidential-release.rbe
+```
+
+Neither officer needs Customer's private key. Customer verifies the two
+approvals and decrypts locally:
+
+```console
+rebyte chain capsule open --file confidential-release.rbe \
+  --private-key customer.rbk --passphrase-file customer.passphrase \
+  --output ./confidential-release-restored
+```
+
+For an 80% creation policy, compute `T = ceil(0.8 * N)` at group creation; a
+five-member group uses `--threshold 4`. This controls how many officers
+authorize the encrypted proposal. It does not require four officers to return
+each time Customer opens the already finalized envelope.
 
 ## Signed configuration baseline
 

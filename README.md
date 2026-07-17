@@ -1,7 +1,7 @@
 # Rebyte
 
 [![CI](https://github.com/pedro5g/Rebyte/actions/workflows/ci.yml/badge.svg)](https://github.com/pedro5g/Rebyte/actions/workflows/ci.yml)
-[![Security audit](https://github.com/pedro5g/Rebyte/actions/workflows/scheduled.yml/badge.svg)](https://github.com/pedro5g/Rebyte/actions/workflows/scheduled.yml)
+[![Security audit](https://github.com/pedro5g/Rebyte/actions/workflows/security.yml/badge.svg)](https://github.com/pedro5g/Rebyte/actions/workflows/security.yml)
 [![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Rebyte is an offline byte-exact reconstruction tool. Its simple mode turns a
@@ -14,13 +14,18 @@ trust-policy verification, decompression and byte-level integrity checks.
 Rebyte 1.2 provides a stable CLI and Rust API. It performs no network access,
 command execution, lifecycle hooks or generated-code interpretation.
 
-The next protocol family is being designed as **Rebyte Chain**: encrypted
-multi-recipient artifacts, self-custodied identities, threshold approvals and
-a local-first signed event graph. It is deliberately not a cryptocurrency or
-global-consensus blockchain. The current architecture, security boundaries and
-implementation gates are documented in the
-[Rebyte Chain design draft](docs/chain-architecture.md). No Chain format or
-command is stable or implemented in Rebyte 1.2.
+**Rebyte Chain** adds encrypted multi-recipient artifacts and self-custodied
+group consensus. Every group member proves possession of the private key
+matching the public identity originally proposed; a configurable `T-of-N`
+threshold must then sign the exact encrypted capsule proposal before it becomes
+a portable `.rbe` or `rbe1_` capsule. Only explicitly listed recipient
+identities can decrypt it.
+
+Chain is deliberately not a cryptocurrency or global-consensus blockchain.
+The implemented envelope, its precise authorization boundary and the future
+event-graph work are documented in the
+[Chain architecture](docs/chain-architecture.md) and
+[Chain v1 specification](schemas/chain-v1.md).
 
 ## Why Rebyte
 
@@ -29,6 +34,8 @@ command is stable or implemented in Rebyte 1.2.
 - canonical binary encoding independent of `serde` or a language runtime;
 - explicit publisher trust using production, staging and development channels;
 - encrypted offline signing keys and distributable public trust documents;
+- self-custodied Ed25519/X25519 identities and encrypted group capsules;
+- unanimous group formation plus configurable capsule approval thresholds;
 - portable paths, bounded decompression and strict rejection of symlinks;
 - dry-run diffs, per-file atomic replacement and recoverable transactions;
 - Linux, macOS, Windows and browser-safe structural WebAssembly APIs.
@@ -163,6 +170,103 @@ rebyte apply \
 never weakens verification. `--backup` retains verified original bytes and the
 journal for a later explicit rollback.
 
+### Encrypted group sharing
+
+Chain separates three decisions:
+
+1. every proposed member must accept the exact group membership and threshold;
+2. at least `T` distinct members must approve the exact encrypted proposal;
+3. only identities listed with `--recipient` can decrypt the finalized capsule.
+
+Create one independent signing/encryption identity per person. The `.rbk`
+bundle and its passphrase stay with that person; only the public JSON is
+shared:
+
+```console
+rebyte chain identity generate \
+  --name "Alice" \
+  --private-key alice.rbk \
+  --public-key alice.public.json \
+  --passphrase-file alice.passphrase
+
+rebyte chain identity generate \
+  --name "Bob" \
+  --private-key bob.rbk \
+  --public-key bob.public.json \
+  --passphrase-file bob.passphrase
+```
+
+Form a two-member group. Formation is always unanimous, even when later
+capsules use a lower approval threshold:
+
+```console
+rebyte chain group create \
+  --name "Release owners" \
+  --member alice.public.json \
+  --member bob.public.json \
+  --threshold 2 \
+  --output owners.proposal.json
+
+rebyte chain group inspect owners.proposal.json
+
+rebyte chain group accept owners.proposal.json \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --output alice.group-acceptance.json
+
+rebyte chain group accept owners.proposal.json \
+  --private-key bob.rbk --passphrase-file bob.passphrase \
+  --output bob.group-acceptance.json
+
+rebyte chain group finalize owners.proposal.json \
+  --acceptance alice.group-acceptance.json \
+  --acceptance bob.group-acceptance.json \
+  --output owners.group.json
+```
+
+Encode any file or portable directory as `.rba`, encrypt it once for one or
+more recipients, collect the required approvals and finalize:
+
+```console
+rebyte encode ./project --format binary --output project.rba
+
+rebyte chain capsule create \
+  --group owners.group.json \
+  --artifact project.rba \
+  --recipient alice.public.json \
+  --recipient bob.public.json \
+  --output project.proposal.rbep
+
+rebyte chain capsule inspect --file project.proposal.rbep
+
+rebyte chain capsule approve project.proposal.rbep \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --output alice.capsule-approval.json
+
+rebyte chain capsule approve project.proposal.rbep \
+  --private-key bob.rbk --passphrase-file bob.passphrase \
+  --output bob.capsule-approval.json
+
+rebyte chain capsule finalize project.proposal.rbep \
+  --approval alice.capsule-approval.json \
+  --approval bob.capsule-approval.json \
+  --output project.rbe
+```
+
+An authorized recipient verifies the complete group certificate, threshold,
+HPKE slot, payload authentication and inner `.rba` before reconstruction:
+
+```console
+rebyte chain capsule inspect --file project.rbe
+rebyte chain capsule open --file project.rbe \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --output ./project-restored
+```
+
+Capsule approval authorizes creation of that exact envelope; it is not a fresh
+approval ceremony every time a listed recipient opens it. Interactive
+`T-of-N` opening requires threshold secret sharing and session-bound encrypted
+shares and is intentionally outside Chain envelope v1.
+
 ## CLI overview
 
 Run `rebyte -h`, `rebyte help COMMAND` or `rebyte COMMAND -h` for contextual
@@ -179,6 +283,9 @@ use terminal-aware color; redirected output and `NO_COLOR` remain plain.
 | `pack` | Read a directory without following symlinks, sign and self-verify a capsule |
 | `hash` | Compute or check the RAP file-domain BLAKE3 digest |
 | `patch` | Create, inspect, preview and atomically apply JSON/TOML semantic patches |
+| `chain identity` | Generate or inspect a self-custodied signing/encryption identity |
+| `chain group` | Create, accept, finalize or inspect a consensus group |
+| `chain capsule` | Encrypt, approve, finalize, inspect or open a group capsule |
 | `inspect` | Parse bounded metadata; unverified data is labelled as such |
 | `verify` | Verify encoding, publisher, signature, payload and every file |
 | `diff` | Compare a verified capsule with a root without writing |
@@ -450,6 +557,46 @@ let patch = parse_patch(
 )?;
 let result = apply_semantic_patch(&patch, br#"{"port":80}"#)?;
 assert!(result.changed());
+# Ok(())
+# }
+```
+
+Chain APIs are also re-exported by `rebyte-core`. Group formation and capsule
+approval are deliberately separate operations, so applications can exchange
+the canonical proposal and signature documents offline:
+
+```rust,no_run
+use rebyte_core::{
+    Artifact, ArtifactOptions, ChainLimits, GroupProposal, accept_group,
+    approve_capsule, create_capsule_proposal, encode_artifact, finalize_capsule,
+    finalize_group, generate_identity, open_capsule,
+};
+
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+let passphrase = b"correct horse battery staple";
+let (private, public) = generate_identity("Alice", passphrase)?;
+let identity = private.unlock(passphrase)?;
+
+let proposal = GroupProposal::new("Owners", 1, vec![public.clone()])?;
+let group = finalize_group(
+    proposal.clone(),
+    vec![accept_group(&proposal, &identity)?],
+)?;
+let artifact = encode_artifact(
+    &Artifact::file(b"private bytes\n".to_vec(), false),
+    &ArtifactOptions::default(),
+)?;
+let limits = ChainLimits::STANDARD;
+let encrypted = create_capsule_proposal(
+    group,
+    artifact.binary(),
+    vec![public],
+    &limits,
+)?;
+let approval = approve_capsule(&encrypted, &identity, &limits)?;
+let envelope = finalize_capsule(encrypted, vec![approval], &limits)?;
+let opened = open_capsule(&envelope, &identity, &limits)?;
+assert_eq!(opened.artifact_binary(), artifact.binary());
 # Ok(())
 # }
 ```

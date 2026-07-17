@@ -5,17 +5,32 @@ and releases follow Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Self-custodied Chain identities with independent Ed25519 signing and X25519
+  HPKE keys in passphrase-encrypted `.rbk` bundles.
+- Unanimous group formation certificates and configurable `T-of-N` capsule
+  approval policies bound to every original public identity.
+- Canonical `.rbe` and `rbe1_` encrypted capsules with one authenticated
+  payload and RFC 9180 HPKE content-key slots for multiple recipients.
+- Complete `rebyte chain identity`, `chain group` and `chain capsule` CLI
+  workflows, stable JSON reports and byte-exact file/directory integration
+  coverage.
+- A bounded Chain-envelope fuzz target and scheduled parser fuzzing.
+
 ### Fixed
 
 - Avoid reopening a completed semantic-patch backup through a read-only Windows
   handle before `FlushFileBuffers`; backup bytes remain synchronized by their
   writable creation handle.
+- Make transaction cleanup idempotent when Windows reports `NotFound` after the
+  last recursively removed journal entry disappears.
 
 ### Documentation
 
-- Define the Rebyte Chain design draft for self-custodied signing and encryption
-  identities, HPKE recipient envelopes, session-bound threshold approvals,
-  signed Merkle event history and local-first browser boundaries.
+- Specify the implemented Chain v1 wire format, security boundary, CLI, Rust
+  API and multi-party flow diagrams; retain threshold opening and the signed
+  Merkle event history as explicit roadmap layers.
 
 ## [1.2.0] - 2026-07-17
 

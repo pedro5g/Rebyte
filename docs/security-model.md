@@ -37,6 +37,48 @@ is bounded, covered by the envelope digest, permitted only for Zstandard and
 never loaded from a destination or external path. Encoders retain a trained
 candidate only after measuring a net reduction including its manifest cost.
 
+## Chain envelope boundary
+
+Chain identity v1 generates independent Ed25519 signing and X25519 HPKE keys.
+The public package self-signs both keys, display name and a random nonce.
+`IdentityId` is a domain-separated BLAKE3 commitment to that proof. The
+passphrase-protected `.rbk` stores both private seeds under Argon2id
+(64 MiB, three iterations, one lane) and XChaCha20-Poly1305. Public identity,
+KDF parameters, salt and nonce are authenticated associated data. Unlocking
+re-derives and compares both public keys.
+
+Group formation is always unanimous. `GroupId` commits the random group nonce,
+threshold and complete sorted public identity packages. Every member signs the
+same `GroupId` together with its own `IdentityId`; a different private key
+cannot occupy that member slot.
+
+Capsule creation first fully verifies a canonical `.rba`, generates a random
+256-bit CEK and encrypts the artifact once with XChaCha20-Poly1305. RFC 9180
+HPKE Base mode with X25519-HKDF-SHA256, HKDF-SHA256 and ChaCha20-Poly1305 wraps
+the same CEK independently to every sorted recipient. The proposal commitment
+covers:
+
+- the complete unanimous group certificate and `GroupId`;
+- artifact digest and exact byte length;
+- proposal and payload nonces;
+- every complete recipient identity and HPKE slot;
+- the encrypted payload digest.
+
+At least the group's configured `T` unique members sign the exact
+`GroupId || ProposalId || MemberIdentityId` binding. Duplicate members,
+reordered data, approvals for another proposal and trailing bytes are rejected.
+
+Opening verifies the canonical envelope, group formation, approval threshold,
+all commitments and the exact recipient before HPKE decapsulation. Plaintext is
+released only after payload authentication, exact length/digest checks and
+full inner `.rba` decoding. CLI reconstruction uses exclusive output creation
+and does not overwrite an existing path.
+
+The capsule threshold authorizes envelope creation. It is not a threshold
+secret-sharing scheme and does not require members to approve every future
+open. Every explicitly listed recipient can decrypt independently. This
+distinction is part of the v1 security contract.
+
 ## Semantic patch boundary
 
 Semantic Patch v1 is a separate unsigned local format. The parser accepts at
@@ -73,6 +115,12 @@ The key ID is the 32-byte `rebyte:v1:key-id` digest of the Ed25519 public key.
 It is an identifier, not an authorization decision. Trust channel and status
 come from the local keyring.
 
+Chain uses distinct derive-key contexts for identity IDs, group IDs, group
+certificate digests, embedded artifact digests, proposal-core digests,
+ciphertext digests, proposal IDs and envelope IDs. Ed25519 messages and AEAD
+associated data also carry distinct fixed byte domains. The exact v1 strings
+and binary layouts are frozen in [the Chain specification](../schemas/chain-v1.md).
+
 ## Trust policy
 
 - Active production keys are accepted by default.
@@ -107,6 +155,10 @@ run can inspect, roll back or resume the persisted transaction.
 | File count | 512 |
 | UTF-8 path | 1024 bytes |
 | Compression ratio | 200:1 |
+
+Chain standard limits add 64 group members, 64 recipients, a 38 MiB binary
+envelope and a 52 MiB text token while retaining the simple-artifact policy for
+the inner `.rba`.
 
 Applications may lower these values. Raising them is a local policy decision;
 the capsule or artifact cannot change them. The unsigned streaming

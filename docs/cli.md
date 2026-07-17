@@ -192,6 +192,175 @@ atomically replaces that one file, synchronizes it and verifies the committed
 digest. Existing backup names, stale targets and concurrent changes fail
 closed. JSON arrays are supported; TOML operations are table-key paths in v1.
 
+## Chain commands
+
+Chain commands operate entirely offline. Control documents and encrypted
+capsules can be carried by any transport, but Rebyte itself opens no network
+connection. Every output uses exclusive creation and existing paths are never
+replaced.
+
+### `chain identity generate`
+
+```text
+rebyte chain identity generate --name NAME
+  [--private-key IDENTITY.rbk]
+  [--public-key IDENTITY.public.json]
+  [--passphrase-file PATH] [--json]
+```
+
+Generates independent Ed25519 signing and X25519 HPKE seed material from
+operating-system cryptographic randomness. The private `.rbk` is protected by
+Argon2id and XChaCha20-Poly1305; its public package self-signs the display name,
+both public keys and a fresh package nonce. The default outputs are
+`rebyte-identity.rbk` and `rebyte-identity.public.json`.
+
+Without `--passphrase-file`, the controlling terminal prompts twice without
+echo. A passphrase file must satisfy the same private-file policy as publisher
+keys. Never send the `.rbk` or its passphrase to another group member.
+
+### `chain identity inspect`
+
+```text
+rebyte chain identity inspect IDENTITY.public.json [--json]
+```
+
+Rejects unknown fields, reformatted non-canonical JSON, invalid Base64URL,
+malformed public keys, a changed encryption key or an invalid self-signature.
+The reported `Identity ID` commits both purpose-specific keys.
+
+### `chain group create`
+
+```text
+rebyte chain group create --name NAME
+  --member ALICE.public.json
+  [--member BOB.public.json ...]
+  --threshold T --output GROUP.proposal.json [--json]
+```
+
+Public identities are validated, sorted and deduplicated. The immutable
+`GroupId` commits the group name, random nonce, every complete public identity
+and the capsule threshold. `1 <= T <= N`, with at most 64 members. `T` controls
+later capsule approvals; group formation itself always requires all `N`
+members.
+
+### `chain group accept`
+
+```text
+rebyte chain group accept GROUP.proposal.json
+  --private-key MEMBER.rbk [--passphrase-file PATH]
+  --output MEMBER.group-acceptance.json [--json]
+```
+
+Recomputes the complete `GroupId`, requires the unlocked identity to be one of
+the proposed members and signs the exact group/member binding. A private key
+that does not correspond to the originally shared public identity cannot fill
+that member's slot.
+
+### `chain group finalize`
+
+```text
+rebyte chain group finalize GROUP.proposal.json
+  --acceptance ALICE.group-acceptance.json
+  [--acceptance BOB.group-acceptance.json ...]
+  --output GROUP.json [--json]
+```
+
+Requires exactly one valid acceptance from every proposed member. Missing,
+duplicate, foreign, rebound or incorrectly signed acceptances fail closed. The
+output is the canonical unanimous group certificate used by capsule creation.
+
+### `chain group inspect`
+
+```text
+rebyte chain group inspect GROUP.proposal.json [--json]
+rebyte chain group inspect GROUP.json [--json]
+```
+
+For a proposal, revalidates `GroupId`, every identity proof, threshold and
+canonical order so each member can review before accepting. For a certificate,
+it additionally verifies every unanimous formation acceptance.
+
+### `chain capsule create`
+
+```text
+rebyte chain capsule create --group GROUP.json --artifact ARTIFACT.rba
+  --recipient ALICE.public.json
+  [--recipient BOB.public.json ...]
+  --output CAPSULE.proposal.rbep [--json]
+```
+
+The input must be a canonical `.rba` already produced by
+`rebyte encode --format binary`. Rebyte fully verifies it, generates a fresh
+256-bit content-encryption key, encrypts the artifact once with
+XChaCha20-Poly1305 and wraps that same key independently to every recipient
+using RFC 9180 HPKE. Recipients are sorted, unique and limited to 64.
+
+The resulting `ProposalId` commits the group certificate, artifact digest and
+length, recipient identities, HPKE slots and ciphertext digest. A group member
+is not implicitly a recipient.
+
+### `chain capsule approve`
+
+```text
+rebyte chain capsule approve CAPSULE.proposal.rbep
+  --private-key MEMBER.rbk [--passphrase-file PATH]
+  --output MEMBER.capsule-approval.json [--json]
+```
+
+Only a member of the embedded unanimous group can approve. The Ed25519
+signature binds `GroupId`, `ProposalId` and approving `IdentityId`, preventing
+an approval from being reused for another group, member or encrypted proposal.
+
+### `chain capsule finalize`
+
+```text
+rebyte chain capsule finalize CAPSULE.proposal.rbep
+  --approval ALICE.capsule-approval.json
+  [--approval BOB.capsule-approval.json ...]
+  --output CAPSULE.rbe [--json | --print-token]
+```
+
+Verifies unique approvals against the immutable group threshold and emits the
+canonical binary `.rbe`. `--print-token` additionally writes the equivalent
+single-line `rbe1_` Base64URL form to stdout. The text token contains the same
+encrypted bytes and can be very large; prefer `.rbe` for files and directories
+that are not small.
+
+### `chain capsule inspect`
+
+```text
+rebyte chain capsule inspect --file CAPSULE.proposal.rbep [--json]
+rebyte chain capsule inspect --file CAPSULE.rbe [--json]
+rebyte chain capsule inspect rbe1_TOKEN [--json]
+```
+
+For a proposal, validates the complete group certificate, proposal
+commitments, recipients and canonical encoding so members can review before
+approving. For a final envelope, it additionally verifies the threshold
+approvals. Inspection never decrypts the artifact. Public recipient names and
+capsule sizes are not confidential metadata.
+
+### `chain capsule open`
+
+```text
+rebyte chain capsule open --file CAPSULE.rbe
+  --private-key RECIPIENT.rbk [--passphrase-file PATH]
+  --output FILE_OR_DIRECTORY [--raw-artifact] [--json]
+
+rebyte chain capsule open rbe1_TOKEN
+  --private-key RECIPIENT.rbk [--passphrase-file PATH]
+  --output FILE_OR_DIRECTORY [--json]
+```
+
+The output is created only after group, threshold, proposal, recipient HPKE,
+payload AEAD, exact artifact length, Chain digest and inner `.rba` verification
+all succeed. `--raw-artifact` writes the decrypted canonical `.rba` instead of
+reconstructing its contents.
+
+Each explicitly listed recipient can open independently after finalization.
+The capsule threshold authorizes creation of the envelope; envelope v1 does
+not require fresh member participation for every open.
+
 ## Consumer commands
 
 ### `inspect`
