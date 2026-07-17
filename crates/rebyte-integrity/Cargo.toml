@@ -1,0 +1,19 @@
+[package]
+name = "rebyte-integrity"
+description = "Domain-separated BLAKE3 integrity for Rebyte capsules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+blake3.workspace = true
+rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+subtle.workspace = true
+
+[lints]
+workspace = true

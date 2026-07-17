@@ -11,3 +11,4 @@ and releases follow Semantic Versioning.
 - Rust workspace quality and contribution policy.
 - Bounded, portable RAP v1 protocol types and path validation.
 - Canonical bounded RAP v1 binary and textual codec.
+- Domain-separated incremental BLAKE3 integrity primitives.

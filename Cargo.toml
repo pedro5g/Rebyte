@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/rebyte-format",
     "crates/rebyte-codec",
+    "crates/rebyte-integrity",
     "crates/rebyte-core",
     "crates/rebyte-cli",
     "xtask",
@@ -10,6 +11,8 @@ members = [
 
 [workspace.dependencies]
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+blake3 = { version = "1.8", default-features = false }
+subtle = { version = "2.6", default-features = false }
 
 [workspace.package]
 version = "0.1.0"

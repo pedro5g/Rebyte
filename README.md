@@ -41,6 +41,9 @@ with platform-independent rules before any filesystem crate receives them.
 serializer format. Its cursor validates every length before slicing, rejects
 non-canonical manifests and supports unpadded `rb1_` Base64URL tokens.
 
+`rebyte-integrity` exposes incremental BLAKE3 hashing with distinct RAP v1
+domains for files, manifests, payloads, capsule roots and publisher key IDs.
+
 ## License
 
 Licensed under either Apache License, Version 2.0 or the MIT license, at your
