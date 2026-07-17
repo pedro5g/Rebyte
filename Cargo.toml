@@ -38,6 +38,7 @@ proptest = "1.9"
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 zeroize = "1.8"
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.package]
 version = "0.1.0"

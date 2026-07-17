@@ -23,3 +23,4 @@ and releases follow Semantic Versioning.
 - Browser-safe unsigned packing and structural inspection WebAssembly exports.
 - Restricted deterministic and environment-backed development signing adapters.
 - Cross-platform dist releases with checksums, SBOMs, attestations and complete usage documentation.
+- Published LCOV and Criterion quality baselines for coverage and performance regression review.

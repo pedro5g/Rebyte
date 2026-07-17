@@ -199,6 +199,10 @@ cargo check --manifest-path fuzz/Cargo.toml --bins
 cargo +nightly fuzz run decode_capsule
 ```
 
+Coverage and performance targets, including the measured initial baseline, are
+tracked transparently in [docs/quality.md](docs/quality.md). Scheduled CI
+publishes both LCOV and Criterion artifacts for regression review.
+
 Internal AI-assisted notes, prompts and artifacts belong only in the ignored
 `.ai/` directory. See [CONTRIBUTING.md](CONTRIBUTING.md) for commit and review
 rules and [docs/release.md](docs/release.md) for the release procedure.
