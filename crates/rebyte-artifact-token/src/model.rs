@@ -215,6 +215,17 @@ pub enum ArtifactCompression {
     None,
 }
 
+/// Adaptive dictionary policy for unsigned artifact compression.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ArtifactDictionary {
+    /// Train from multiple canonical file samples and retain only a net win.
+    #[default]
+    Auto,
+    /// Never train or embed a dictionary.
+    None,
+}
+
 /// Encoding and verification policy for one unsigned artifact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -223,6 +234,8 @@ pub struct ArtifactOptions {
     pub compression: ArtifactCompression,
     /// Native encoder effort.
     pub profile: CompressionProfile,
+    /// Optional adaptive dictionary selection.
+    pub dictionary: ArtifactDictionary,
     /// Resource limits applied during encoding and self-verification.
     pub limits: SecurityLimits,
 }
@@ -242,6 +255,13 @@ impl ArtifactOptions {
         self
     }
 
+    /// Selects adaptive training or disables embedded dictionaries.
+    #[must_use]
+    pub const fn with_dictionary(mut self, value: ArtifactDictionary) -> Self {
+        self.dictionary = value;
+        self
+    }
+
     /// Replaces all defensive limits.
     #[must_use]
     pub const fn with_limits(mut self, value: SecurityLimits) -> Self {
@@ -255,6 +275,7 @@ impl Default for ArtifactOptions {
         Self {
             compression: ArtifactCompression::Auto,
             profile: CompressionProfile::Balanced,
+            dictionary: ArtifactDictionary::Auto,
             limits: SecurityLimits::SIMPLE_ARTIFACT,
         }
     }
@@ -271,6 +292,7 @@ pub struct EncodedArtifact {
     pub(crate) envelope_digest: Digest32,
     pub(crate) original_size: u64,
     pub(crate) stored_size: u64,
+    pub(crate) dictionary_size: u32,
     pub(crate) entry_count: u32,
 }
 
@@ -339,6 +361,12 @@ impl EncodedArtifact {
         self.stored_size
     }
 
+    /// Returns embedded adaptive-dictionary bytes, or zero.
+    #[must_use]
+    pub const fn dictionary_size(&self) -> u32 {
+        self.dictionary_size
+    }
+
     /// Returns the number of explicit file and directory entries.
     #[must_use]
     pub const fn entry_count(&self) -> u32 {
@@ -356,6 +384,7 @@ pub struct DecodedArtifact {
     pub(crate) envelope_digest: Digest32,
     pub(crate) original_size: u64,
     pub(crate) stored_size: u64,
+    pub(crate) dictionary_size: u32,
 }
 
 impl DecodedArtifact {
@@ -405,6 +434,12 @@ impl DecodedArtifact {
     #[must_use]
     pub const fn stored_size(&self) -> u64 {
         self.stored_size
+    }
+
+    /// Returns verified embedded adaptive-dictionary bytes, or zero.
+    #[must_use]
+    pub const fn dictionary_size(&self) -> u32 {
+        self.dictionary_size
     }
 }
 

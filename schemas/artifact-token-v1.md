@@ -23,7 +23,7 @@ All integers are unsigned and big-endian.
 | 5 | 1 | kind: `0` file, `1` directory |
 | 6 | 1 | compression: `0` none, `1` Zstandard |
 | 7 | 1 | profile: `0` fast, `1` balanced, `2` maximum |
-| 8 | 2 | flags: bit 0 suggested name, bit 1 suggested path |
+| 8 | 2 | flags: bit 0 name, bit 1 path, bit 2 embedded dictionary |
 | 10 | 2 | reserved zero |
 | 12 | 4 | entry count |
 | 16 | 8 | manifest length |
@@ -38,8 +38,12 @@ payload. Trailing bytes are forbidden.
 ## Manifest
 
 The manifest begins with a `u16` suggested-name length and UTF-8 bytes, a
-`u16` suggested-path length and UTF-8 bytes, and a `u32` entry count. A zero
-length means absent.
+`u16` suggested-path length and UTF-8 bytes. A zero length means absent. When
+flag bit 2 is set, these fields are followed by a nonzero `u32` dictionary
+length and that many bytes. The dictionary is at most 16 `KiB`, is valid only
+with Zstandard, and is followed by the `u32` entry count. Without bit 2, the
+entry count immediately follows the path field, preserving canonical artifacts
+created before adaptive dictionaries existed.
 
 Each entry contains:
 
@@ -72,6 +76,10 @@ The envelope digest uses context `rebyte:v1:artifact-envelope` over version,
 kind, compression, profile, flags, all declared lengths, the content digest,
 manifest and stored payload. Every field is verified before reconstructed
 content is released.
+
+An embedded dictionary is therefore integrity-protected metadata, not an
+external dependency. Decoders reject an empty, oversized or algorithm-
+incompatible dictionary before decompression.
 
 Each file uses the existing `rebyte:v1:file` digest domain.
 
@@ -106,3 +114,10 @@ single file, a 64 GiB stored payload, a 64 MiB manifest and 100,000 entries.
 It is intended only for streaming binary files, not inline Base64URL tokens.
 These are implementation safety ceilings, not format capabilities or a claim
 that every host has sufficient storage.
+
+Adaptive training examines at most 64 `KiB` per regular file and 2 `MiB`
+overall in canonical order, requires at least eight samples, and emits at most
+16 `KiB`. The encoder compares the complete dictionary cost against ordinary
+Zstandard and never retains a non-improving candidate. These constants make
+the selection deterministic and bound training memory; they do not change
+decoder resource ceilings.

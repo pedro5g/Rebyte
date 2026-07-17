@@ -8,18 +8,23 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use rebyte_compression::{CompressionProfile, compress_stream, decompress_stream};
+use rebyte_compression::{
+    CompressionMethod, CompressionProfile, compress_stream_with_dictionary,
+    decompress_stream_with_dictionary, train_dictionary,
+};
 use rebyte_format::{
     CompressionAlgorithm, Digest32, PathError, RelativeArtifactPath, SecurityLimits,
 };
 use rebyte_integrity::{DomainHasher, digest_matches};
 
 use super::{
-    ARTIFACT_HEADER_SIZE, Artifact, ArtifactCompression, ArtifactEntryKind, ArtifactKind,
-    ArtifactOptions, ArtifactTokenError, CanonicalEntry, Header, content_digest, decode_header,
-    decode_manifest, encode_header, encode_manifest, enforce_binary_size, enforce_entry_count,
-    enforce_file_size, enforce_header_limits, enforce_payload_size, envelope_hasher,
-    metadata_flags, validate_metadata, validate_tree,
+    ARTIFACT_HEADER_SIZE, Artifact, ArtifactCompression, ArtifactDictionary, ArtifactEntryKind,
+    ArtifactKind, ArtifactOptions, ArtifactTokenError, CanonicalEntry, Header,
+    MAX_DICTIONARY_SAMPLE_SIZE, MAX_DICTIONARY_SIZE, MAX_DICTIONARY_TRAINING_BYTES,
+    MIN_DICTIONARY_SAMPLES, content_digest, decode_header, decode_manifest, encode_header,
+    encode_manifest, enforce_binary_size, enforce_entry_count, enforce_file_size,
+    enforce_header_limits, enforce_payload_size, envelope_hasher, metadata_flags,
+    validate_metadata, validate_tree,
 };
 
 const BUFFER_SIZE: usize = 64 * 1_024;
@@ -149,6 +154,7 @@ pub struct StreamArtifactReport {
     envelope_digest: Digest32,
     original_size: u64,
     stored_size: u64,
+    dictionary_size: u32,
     entry_count: u32,
     suggested_name: Option<String>,
     suggested_path: Option<RelativeArtifactPath>,
@@ -195,6 +201,12 @@ impl StreamArtifactReport {
     #[must_use]
     pub const fn stored_size(&self) -> u64 {
         self.stored_size
+    }
+
+    /// Returns verified embedded adaptive-dictionary bytes, or zero.
+    #[must_use]
+    pub const fn dictionary_size(&self) -> u32 {
+        self.dictionary_size
     }
 
     /// Returns explicit file and directory entries.
@@ -258,7 +270,6 @@ pub fn encode_artifact_path(
         .iter()
         .map(|entry| entry.canonical.clone())
         .collect();
-    let manifest = encode_manifest(&artifact, &canonical, &options.limits)?;
     let content = content_digest(scanned.kind, &canonical);
 
     create_parent(output)?;
@@ -266,15 +277,17 @@ pub fn encode_artifact_path(
     let mut stored = tempfile::Builder::new()
         .prefix(".rebyte-stored-")
         .tempfile_in(parent)?;
-    let (compression, stored_size) = spool_payload(&scanned, &mut stored, options)?;
+    let (compression, dictionary, stored_size) =
+        spool_payload(&scanned, stored.as_file_mut(), options)?;
     stored.as_file_mut().seek(io::SeekFrom::Start(0))?;
+    let manifest = encode_manifest(&artifact, &dictionary, &canonical, &options.limits)?;
 
     let entry_count = usize_to_u32(canonical.len())?;
     let mut header = Header {
         kind: scanned.kind,
         compression,
         profile: options.profile,
-        flags: metadata_flags(&artifact),
+        flags: metadata_flags(&artifact, &dictionary),
         entry_count,
         manifest_size: usize_to_u64(manifest.len())?,
         original_size: scanned.original_size,
@@ -384,10 +397,15 @@ fn decode_artifact_file_inner(
     )?;
     let hasher = envelope_hasher(&header, &manifest);
     let mut digesting = DigestReader::new(&mut source, hasher);
-    decompress_stream(
+    let method = if decoded_manifest.dictionary.is_empty() {
+        CompressionMethod::new(header.compression)
+    } else {
+        CompressionMethod::zstd_with_dictionary(&decoded_manifest.dictionary)
+    };
+    decompress_stream_with_dictionary(
         &mut digesting,
         raw.as_file_mut(),
-        header.compression,
+        method,
         header.stored_size,
         header.original_size,
         limits,
@@ -416,6 +434,7 @@ fn decode_artifact_file_inner(
         envelope_digest: actual_envelope,
         original_size: header.original_size,
         stored_size: header.stored_size,
+        dictionary_size: usize_to_u32(decoded_manifest.dictionary.len())?,
         entry_count: header.entry_count,
         suggested_name: decoded_manifest.suggested_name,
         suggested_path: decoded_manifest.suggested_path,
@@ -580,64 +599,149 @@ fn hash_source_file(
 
 fn spool_payload(
     scanned: &ScannedArtifact,
-    output: &mut tempfile::NamedTempFile,
+    output: &mut File,
     options: &ArtifactOptions,
-) -> Result<(CompressionAlgorithm, u64), ArtifactIoError> {
+) -> Result<(CompressionAlgorithm, Vec<u8>, u64), ArtifactIoError> {
     match options.compression {
-        ArtifactCompression::None => spool_with_algorithm(
+        ArtifactCompression::None => spool_with_method(
             scanned,
             output,
-            CompressionAlgorithm::None,
+            CompressionMethod::new(CompressionAlgorithm::None),
             options.profile,
             &options.limits,
         )
-        .map(|size| (CompressionAlgorithm::None, size)),
-        ArtifactCompression::Zstd => spool_with_algorithm(
-            scanned,
-            output,
-            CompressionAlgorithm::Zstd,
-            options.profile,
-            &options.limits,
-        )
-        .map(|size| (CompressionAlgorithm::Zstd, size)),
-        ArtifactCompression::Auto => {
-            let compressed = spool_with_algorithm(
+        .map(|size| (CompressionAlgorithm::None, Vec::new(), size)),
+        ArtifactCompression::Zstd => {
+            let ordinary = spool_with_method(
                 scanned,
                 output,
-                CompressionAlgorithm::Zstd,
+                CompressionMethod::new(CompressionAlgorithm::Zstd),
                 options.profile,
                 &options.limits,
             )?;
-            if compressed < scanned.original_size {
-                Ok((CompressionAlgorithm::Zstd, compressed))
+            let (dictionary, size) = best_stream_dictionary(scanned, output, ordinary, options)?;
+            Ok((CompressionAlgorithm::Zstd, dictionary, size))
+        }
+        ArtifactCompression::Auto => {
+            let ordinary = spool_with_method(
+                scanned,
+                output,
+                CompressionMethod::new(CompressionAlgorithm::Zstd),
+                options.profile,
+                &options.limits,
+            )?;
+            let (dictionary, compressed) =
+                best_stream_dictionary(scanned, output, ordinary, options)?;
+            let dictionary_cost = usize_to_u64(dictionary.len())?
+                .saturating_add(u64::from(!dictionary.is_empty()) * 4);
+            if compressed.saturating_add(dictionary_cost) < scanned.original_size {
+                Ok((CompressionAlgorithm::Zstd, dictionary, compressed))
             } else {
-                let size = spool_with_algorithm(
+                let size = spool_with_method(
                     scanned,
                     output,
-                    CompressionAlgorithm::None,
+                    CompressionMethod::new(CompressionAlgorithm::None),
                     options.profile,
                     &options.limits,
                 )?;
-                Ok((CompressionAlgorithm::None, size))
+                Ok((CompressionAlgorithm::None, Vec::new(), size))
             }
         }
     }
 }
 
-fn spool_with_algorithm(
+fn best_stream_dictionary(
     scanned: &ScannedArtifact,
-    output: &mut tempfile::NamedTempFile,
-    algorithm: CompressionAlgorithm,
+    output: &mut File,
+    ordinary_size: u64,
+    options: &ArtifactOptions,
+) -> Result<(Vec<u8>, u64), ArtifactIoError> {
+    let Some(dictionary) = train_stream_dictionary(scanned, options)? else {
+        return Ok((Vec::new(), ordinary_size));
+    };
+    let mut candidate = tempfile::tempfile()?;
+    let candidate_size = spool_with_method(
+        scanned,
+        &mut candidate,
+        CompressionMethod::zstd_with_dictionary(&dictionary),
+        options.profile,
+        &options.limits,
+    )?;
+    let dictionary_cost = usize_to_u64(dictionary.len())?.saturating_add(4);
+    if candidate_size.saturating_add(dictionary_cost) >= ordinary_size {
+        return Ok((Vec::new(), ordinary_size));
+    }
+    output.set_len(0)?;
+    output.seek(io::SeekFrom::Start(0))?;
+    candidate.seek(io::SeekFrom::Start(0))?;
+    copy_exact(&mut candidate, output, candidate_size)?;
+    output.flush()?;
+    output.sync_all()?;
+    Ok((dictionary, candidate_size))
+}
+
+fn train_stream_dictionary(
+    scanned: &ScannedArtifact,
+    options: &ArtifactOptions,
+) -> Result<Option<Vec<u8>>, ArtifactIoError> {
+    if options.dictionary == ArtifactDictionary::None {
+        return Ok(None);
+    }
+    let mut training_samples = Vec::new();
+    let mut sampled_bytes = 0_usize;
+    for entry in &scanned.entries {
+        let Some(path) = &entry.source else {
+            continue;
+        };
+        if sampled_bytes >= MAX_DICTIONARY_TRAINING_BYTES {
+            break;
+        }
+        let available = MAX_DICTIONARY_TRAINING_BYTES.saturating_sub(sampled_bytes);
+        let declared = usize::try_from(entry.canonical.size)
+            .map_err(|_| ArtifactTokenError::LengthOverflow)?;
+        let length = declared.min(MAX_DICTIONARY_SAMPLE_SIZE).min(available);
+        if length < 8 {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(ArtifactIoError::SymbolicLink);
+        }
+        if !metadata.is_file() || metadata.len() != entry.canonical.size {
+            return Err(ArtifactIoError::SourceChanged);
+        }
+        let mut source = File::open(path)?;
+        let mut sample = Vec::with_capacity(length);
+        std::io::Read::take(&mut source, usize_to_u64(length)?).read_to_end(&mut sample)?;
+        if sample.len() != length || source.metadata()?.len() != entry.canonical.size {
+            return Err(ArtifactIoError::SourceChanged);
+        }
+        sampled_bytes = sampled_bytes
+            .checked_add(length)
+            .ok_or(ArtifactTokenError::LengthOverflow)?;
+        training_samples.push(sample);
+    }
+    if training_samples.len() < MIN_DICTIONARY_SAMPLES {
+        return Ok(None);
+    }
+    let maximum = (sampled_bytes / 20).clamp(256, MAX_DICTIONARY_SIZE);
+    Ok(train_dictionary(&training_samples, maximum).ok())
+}
+
+fn spool_with_method(
+    scanned: &ScannedArtifact,
+    output: &mut File,
+    method: CompressionMethod<'_>,
     profile: CompressionProfile,
     limits: &SecurityLimits,
 ) -> Result<u64, ArtifactIoError> {
-    output.as_file_mut().set_len(0)?;
-    output.as_file_mut().seek(io::SeekFrom::Start(0))?;
+    output.set_len(0)?;
+    output.seek(io::SeekFrom::Start(0))?;
     let mut reader = ArtifactReader::new(&scanned.entries);
-    let result = compress_stream(
+    let result = compress_stream_with_dictionary(
         &mut reader,
-        output.as_file_mut(),
-        algorithm,
+        output,
+        method,
         profile,
         scanned.original_size,
         limits,
@@ -646,8 +750,8 @@ fn spool_with_algorithm(
         return Err(failure.into_error());
     }
     let stats = result.map_err(ArtifactTokenError::Compression)?;
-    output.as_file_mut().flush()?;
-    output.as_file().sync_all()?;
+    output.flush()?;
+    output.sync_all()?;
     Ok(stats.output_bytes)
 }
 

@@ -8,11 +8,12 @@ pub use rebyte_apply::{
     list_transactions, resume_transaction, rollback_transaction,
 };
 pub use rebyte_artifact_token::{
-    ARTIFACT_HEADER_SIZE, ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactEntry,
-    ArtifactEntryKind, ArtifactIoError, ArtifactKind, ArtifactOptions, ArtifactPathMetadata,
-    ArtifactTokenError, DecodedArtifact, EncodedArtifact, StreamArtifactReport, decode_artifact,
-    decode_artifact_file, decode_artifact_file_expected, decode_artifact_token, encode_artifact,
-    encode_artifact_binary_token, encode_artifact_path, encode_artifact_token,
+    ARTIFACT_HEADER_SIZE, ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactDictionary,
+    ArtifactEntry, ArtifactEntryKind, ArtifactIoError, ArtifactKind, ArtifactOptions,
+    ArtifactPathMetadata, ArtifactTokenError, DecodedArtifact, EncodedArtifact,
+    StreamArtifactReport, decode_artifact, decode_artifact_file, decode_artifact_file_expected,
+    decode_artifact_token, encode_artifact, encode_artifact_binary_token, encode_artifact_path,
+    encode_artifact_token,
 };
 pub use rebyte_diff::{ChangeKind, DiffEntry, DiffError, DiffReport, DiffSummary, diff_capsule};
 pub use rebyte_file_token::{

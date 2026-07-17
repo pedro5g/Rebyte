@@ -71,13 +71,13 @@ crossing a trust boundary. The complete format and verification order are in
 [Artifact Token v1](schemas/artifact-token-v1.md). Legacy `rf1_` file tokens
 remain decodable.
 
-For inputs above the standard 64 MiB per-file limit, use the bounded streaming
+For inputs above the standard 64 `MiB` per-file limit, use the bounded streaming
 binary mode. It never places the full source, compressed artifact or restored
 file in memory:
 
 ```console
 rebyte encode ./large.bin \
-  --format binary --limits large --profile maximum \
+  --format binary --limits large --profile maximum --dictionary auto \
   --output large.rba
 
 rebyte decode --file large.rba --limits large --output ./large-copy.bin
@@ -88,6 +88,13 @@ rebyte hash ./large-copy.bin --limits large
 `--limits large` is explicit, remains bounded, and is available only with
 seekable binary artifact files. Inline tokens keep the smaller standard bounds
 because shells and environment variables are unsuitable for very large data.
+
+`--dictionary auto` samples multiple files in a folder and embeds a trained
+Zstandard dictionary only when the complete artifact becomes smaller. Use
+`--dictionary none` for the lowest encoding latency. A dictionary is normally
+not useful for one giant file: the single Zstandard stream already learns
+patterns as it advances, and `--profile maximum` adds bounded long-distance
+matching. Rebyte reports embedded dictionary bytes in human and JSON output.
 
 ### Signed publisher workflow
 

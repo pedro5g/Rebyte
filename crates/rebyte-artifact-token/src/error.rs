@@ -93,6 +93,8 @@ pub enum ArtifactTokenError {
     NonZeroReserved,
     /// Declared and encoded metadata flags differed.
     MetadataFlagMismatch,
+    /// An embedded dictionary was empty, oversized or used with another algorithm.
+    InvalidDictionary,
     /// A UTF-8 manifest field was malformed.
     InvalidUtf8,
     /// A checked conversion or arithmetic operation overflowed.
@@ -189,6 +191,9 @@ impl fmt::Display for ArtifactTokenError {
             Self::NonZeroReserved => formatter.write_str("artifact reserved field is nonzero"),
             Self::MetadataFlagMismatch => {
                 formatter.write_str("artifact metadata flags do not match its manifest")
+            }
+            Self::InvalidDictionary => {
+                formatter.write_str("artifact dictionary metadata is invalid")
             }
             Self::InvalidUtf8 => formatter.write_str("artifact manifest is not valid UTF-8"),
             Self::LengthOverflow => formatter.write_str("artifact length overflow"),

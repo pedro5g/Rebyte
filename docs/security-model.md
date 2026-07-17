@@ -32,6 +32,11 @@ symlinks are forbidden. There is deliberately no publisher or trust-policy
 step, so this mode must not authorize installation or execution. Legacy
 `rf1_` tokens retain their original single-file decode pipeline.
 
+An optional artifact dictionary is stored inside the canonical manifest. It
+is bounded, covered by the envelope digest, permitted only for Zstandard and
+never loaded from a destination or external path. Encoders retain a trained
+candidate only after measuring a net reduction including its manifest cost.
+
 ## Cryptographic domains
 
 RAP v1 uses BLAKE3 derive-key mode with these exact context strings:

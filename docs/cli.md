@@ -34,6 +34,7 @@ rebyte help verify
 ```text
 rebyte encode FILE|DIRECTORY|- [--compression auto|zstd|none]
               [--profile fast|balanced|maximum]
+              [--dictionary auto|none]
               [--include-name | --name NAME]
               [--suggest-path RELATIVE_PATH]
               [--format token|binary] [--limits standard|large]
@@ -46,6 +47,13 @@ Zstandard and keeps it only when its payload is smaller. Files and complete
 portable directory trees are supported; symlinks and special files are
 rejected. Optional name and relative-path fields are untrusted reconstruction
 hints.
+
+`--dictionary auto` deterministically samples canonical file order, trains a
+bounded shared Zstandard dictionary, and retains it only when dictionary bytes
+plus compressed bytes beat ordinary Zstandard. Training needs at least eight
+usable file samples and is aimed at folders containing similar small files.
+`none` skips this CPU work. Single large files rely on the selected Zstandard
+profile instead.
 
 Binary format requires `--output` and creates a canonical `.rba` without
 Base64URL expansion. `--limits large` requires binary format and a seekable

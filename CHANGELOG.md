@@ -11,6 +11,8 @@ and releases follow Semantic Versioning.
   directory trees, including empty directories, executable bits and optional
   untrusted name/destination hints.
 - Deterministic fast, balanced and maximum compression profiles.
+- Optional bounded Zstandard dictionary training for similar multi-file
+  artifacts, retained only after a complete-size comparison.
 - Bounded streaming `.rba` encoding and transactional reconstruction for
   inputs up to the explicit large-artifact policy, without full-file memory
   allocation.

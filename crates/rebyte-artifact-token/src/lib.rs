@@ -21,6 +21,6 @@ pub use codec::{
 };
 pub use error::ArtifactTokenError;
 pub use model::{
-    Artifact, ArtifactCompression, ArtifactEntry, ArtifactEntryKind, ArtifactKind, ArtifactOptions,
-    DecodedArtifact, EncodedArtifact,
+    Artifact, ArtifactCompression, ArtifactDictionary, ArtifactEntry, ArtifactEntryKind,
+    ArtifactKind, ArtifactOptions, DecodedArtifact, EncodedArtifact,
 };

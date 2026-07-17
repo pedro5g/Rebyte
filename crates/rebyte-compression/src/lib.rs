@@ -11,8 +11,11 @@ use rebyte_format::{CompressionAlgorithm, SecurityLimits};
 pub const ZSTD_LEVEL_V1: i32 = 3;
 
 const BUFFER_SIZE: usize = 64 * 1_024;
+#[cfg(not(target_arch = "wasm32"))]
 const ZSTD_LEVEL_FAST: i32 = 1;
+#[cfg(not(target_arch = "wasm32"))]
 const ZSTD_LEVEL_MAXIMUM: i32 = 19;
+#[cfg(not(target_arch = "wasm32"))]
 const MAXIMUM_WINDOW_LOG: u32 = 27;
 
 /// Reproducible speed-versus-size policy for native Zstandard encoding.
@@ -28,6 +31,7 @@ pub enum CompressionProfile {
 }
 
 impl CompressionProfile {
+    #[cfg(not(target_arch = "wasm32"))]
     const fn level(self) -> i32 {
         match self {
             Self::Fast => ZSTD_LEVEL_FAST,

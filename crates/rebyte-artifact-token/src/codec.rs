@@ -5,15 +5,18 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rebyte_compression::{CompressionError, CompressionProfile, compress_with_profile, decompress};
+use rebyte_compression::{
+    CompressionError, CompressionProfile, compress_with_dictionary, compress_with_profile,
+    decompress_with_dictionary, train_dictionary,
+};
 use rebyte_format::{CompressionAlgorithm, Digest32, RelativeArtifactPath, SecurityLimits};
 use rebyte_integrity::{DomainHasher, digest_matches, file_digest};
 use std::collections::HashSet;
 
 use crate::error::ArtifactTokenError;
 use crate::model::{
-    Artifact, ArtifactCompression, ArtifactEntry, ArtifactEntryKind, ArtifactKind, ArtifactOptions,
-    DecodedArtifact, EncodedArtifact,
+    Artifact, ArtifactCompression, ArtifactDictionary, ArtifactEntry, ArtifactEntryKind,
+    ArtifactKind, ArtifactOptions, DecodedArtifact, EncodedArtifact,
 };
 
 mod stream;
@@ -32,7 +35,12 @@ const MAGIC: [u8; 4] = *b"RBAT";
 const VERSION: u8 = 1;
 const FLAG_NAME: u16 = 1;
 const FLAG_PATH: u16 = 1 << 1;
-const SUPPORTED_FLAGS: u16 = FLAG_NAME | FLAG_PATH;
+const FLAG_DICTIONARY: u16 = 1 << 2;
+const SUPPORTED_FLAGS: u16 = FLAG_NAME | FLAG_PATH | FLAG_DICTIONARY;
+const MAX_DICTIONARY_SIZE: usize = 16 * 1_024;
+const MAX_DICTIONARY_SAMPLE_SIZE: usize = 64 * 1_024;
+const MAX_DICTIONARY_TRAINING_BYTES: usize = 2 * 1_024 * 1_024;
+const MIN_DICTIONARY_SAMPLES: usize = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CanonicalEntry {
@@ -61,7 +69,14 @@ struct Header {
 struct DecodedManifest {
     suggested_name: Option<String>,
     suggested_path: Option<RelativeArtifactPath>,
+    dictionary: Vec<u8>,
     entries: Vec<CanonicalEntry>,
+}
+
+struct SelectedPayload {
+    compression: CompressionAlgorithm,
+    dictionary: Vec<u8>,
+    stored: Vec<u8>,
 }
 
 /// Encodes one artifact into canonical `.rba` bytes.
@@ -76,13 +91,17 @@ pub fn encode_artifact(
     options: &ArtifactOptions,
 ) -> Result<EncodedArtifact, ArtifactTokenError> {
     let (entries, payload) = canonicalize(artifact, &options.limits)?;
-    let manifest = encode_manifest(artifact, &entries, &options.limits)?;
     let content_digest = content_digest(artifact.kind, &entries);
-    let (compression, stored) = select_payload(&payload, options)?;
+    let SelectedPayload {
+        compression,
+        dictionary,
+        stored,
+    } = select_payload(&payload, &entries, options)?;
+    let manifest = encode_manifest(artifact, &dictionary, &entries, &options.limits)?;
     let entry_count = usize_to_u32(entries.len())?;
     let original_size = usize_to_u64(payload.len())?;
     let stored_size = usize_to_u64(stored.len())?;
-    let flags = metadata_flags(artifact);
+    let flags = metadata_flags(artifact, &dictionary);
     let mut header = Header {
         kind: artifact.kind,
         compression,
@@ -120,6 +139,7 @@ pub fn encode_artifact(
         envelope_digest: header.envelope_digest,
         original_size,
         stored_size,
+        dictionary_size: usize_to_u32(dictionary.len())?,
         entry_count,
     })
 }
@@ -197,7 +217,13 @@ pub fn decode_artifact(
     if !digest_matches(&header.content_digest, &actual_content_digest) {
         return Err(ArtifactTokenError::ContentDigestMismatch);
     }
-    let payload = decompress(stored, header.compression, header.original_size, limits)?;
+    let payload = decompress_with_dictionary(
+        stored,
+        header.compression,
+        &decoded_manifest.dictionary,
+        header.original_size,
+        limits,
+    )?;
     let artifact = reconstruct(
         header.kind,
         decoded_manifest.suggested_name,
@@ -213,6 +239,7 @@ pub fn decode_artifact(
         envelope_digest: actual_envelope_digest,
         original_size: header.original_size,
         stored_size: header.stored_size,
+        dictionary_size: usize_to_u32(decoded_manifest.dictionary.len())?,
     })
 }
 
@@ -396,6 +423,7 @@ fn reconstruct(
 
 fn encode_manifest(
     artifact: &Artifact,
+    dictionary: &[u8],
     entries: &[CanonicalEntry],
     limits: &SecurityLimits,
 ) -> Result<Vec<u8>, ArtifactTokenError> {
@@ -408,6 +436,10 @@ fn encode_manifest(
             .as_ref()
             .map(RelativeArtifactPath::as_str),
     )?;
+    if !dictionary.is_empty() {
+        output.extend_from_slice(&usize_to_u32(dictionary.len())?.to_be_bytes());
+        output.extend_from_slice(dictionary);
+    }
     output.extend_from_slice(&usize_to_u32(entries.len())?.to_be_bytes());
     for entry in entries {
         output.push(entry.kind.wire());
@@ -448,8 +480,22 @@ fn decode_manifest(
                 .map_err(ArtifactTokenError::Path)
         })
         .transpose()?;
+    let dictionary = if header.flags & FLAG_DICTIONARY == 0 {
+        Vec::new()
+    } else {
+        let length =
+            usize::try_from(cursor.read_u32()?).map_err(|_| ArtifactTokenError::LengthOverflow)?;
+        if length == 0 || length > MAX_DICTIONARY_SIZE {
+            return Err(ArtifactTokenError::InvalidDictionary);
+        }
+        cursor.read_bytes(length)?.to_vec()
+    };
+    if !dictionary.is_empty() && header.compression != CompressionAlgorithm::Zstd {
+        return Err(ArtifactTokenError::InvalidDictionary);
+    }
     let flags = (u16::from(suggested_name.is_some()) * FLAG_NAME)
-        | (u16::from(suggested_path.is_some()) * FLAG_PATH);
+        | (u16::from(suggested_path.is_some()) * FLAG_PATH)
+        | (u16::from(!dictionary.is_empty()) * FLAG_DICTIONARY);
     if flags != header.flags {
         return Err(ArtifactTokenError::MetadataFlagMismatch);
     }
@@ -497,6 +543,7 @@ fn decode_manifest(
         _ => Ok(DecodedManifest {
             suggested_name,
             suggested_path,
+            dictionary,
             entries,
         }),
     }
@@ -716,27 +763,29 @@ const fn profile_from_wire(value: u8) -> Result<CompressionProfile, ArtifactToke
 
 fn select_payload(
     payload: &[u8],
+    entries: &[CanonicalEntry],
     options: &ArtifactOptions,
-) -> Result<(CompressionAlgorithm, Vec<u8>), ArtifactTokenError> {
+) -> Result<SelectedPayload, ArtifactTokenError> {
     match options.compression {
-        ArtifactCompression::None => Ok((
-            CompressionAlgorithm::None,
-            compress_with_profile(
+        ArtifactCompression::None => Ok(SelectedPayload {
+            compression: CompressionAlgorithm::None,
+            dictionary: Vec::new(),
+            stored: compress_with_profile(
                 payload,
                 CompressionAlgorithm::None,
                 options.profile,
                 &options.limits,
             )?,
-        )),
-        ArtifactCompression::Zstd => Ok((
-            CompressionAlgorithm::Zstd,
-            compress_with_profile(
+        }),
+        ArtifactCompression::Zstd => {
+            let ordinary = compress_with_profile(
                 payload,
                 CompressionAlgorithm::Zstd,
                 options.profile,
                 &options.limits,
-            )?,
-        )),
+            )?;
+            Ok(best_zstd_candidate(payload, entries, ordinary, options))
+        }
         ArtifactCompression::Auto => {
             match compress_with_profile(
                 payload,
@@ -744,27 +793,122 @@ fn select_payload(
                 options.profile,
                 &options.limits,
             ) {
-                Ok(compressed) if compressed.len() < payload.len() => {
-                    Ok((CompressionAlgorithm::Zstd, compressed))
+                Ok(compressed) => {
+                    let candidate = best_zstd_candidate(payload, entries, compressed, options);
+                    let complete_size = candidate
+                        .dictionary
+                        .len()
+                        .saturating_add(candidate.stored.len())
+                        .saturating_add(usize::from(!candidate.dictionary.is_empty()) * 4);
+                    if complete_size < payload.len() {
+                        Ok(candidate)
+                    } else {
+                        Ok(SelectedPayload {
+                            compression: CompressionAlgorithm::None,
+                            dictionary: Vec::new(),
+                            stored: compress_with_profile(
+                                payload,
+                                CompressionAlgorithm::None,
+                                options.profile,
+                                &options.limits,
+                            )?,
+                        })
+                    }
                 }
-                Ok(_) | Err(CompressionError::UnsupportedEncoder) => Ok((
-                    CompressionAlgorithm::None,
-                    compress_with_profile(
+                Err(CompressionError::UnsupportedEncoder) => Ok(SelectedPayload {
+                    compression: CompressionAlgorithm::None,
+                    dictionary: Vec::new(),
+                    stored: compress_with_profile(
                         payload,
                         CompressionAlgorithm::None,
                         options.profile,
                         &options.limits,
                     )?,
-                )),
+                }),
                 Err(error) => Err(error.into()),
             }
         }
     }
 }
 
-fn metadata_flags(artifact: &Artifact) -> u16 {
+fn best_zstd_candidate(
+    payload: &[u8],
+    entries: &[CanonicalEntry],
+    ordinary: Vec<u8>,
+    options: &ArtifactOptions,
+) -> SelectedPayload {
+    let Some(dictionary) = train_artifact_dictionary(payload, entries, options) else {
+        return SelectedPayload {
+            compression: CompressionAlgorithm::Zstd,
+            dictionary: Vec::new(),
+            stored: ordinary,
+        };
+    };
+    let Ok(compressed) = compress_with_dictionary(
+        payload,
+        CompressionAlgorithm::Zstd,
+        options.profile,
+        &dictionary,
+        &options.limits,
+    ) else {
+        return SelectedPayload {
+            compression: CompressionAlgorithm::Zstd,
+            dictionary: Vec::new(),
+            stored: ordinary,
+        };
+    };
+    let dictionary_cost = dictionary.len().saturating_add(4);
+    if compressed.len().saturating_add(dictionary_cost) < ordinary.len() {
+        SelectedPayload {
+            compression: CompressionAlgorithm::Zstd,
+            dictionary,
+            stored: compressed,
+        }
+    } else {
+        SelectedPayload {
+            compression: CompressionAlgorithm::Zstd,
+            dictionary: Vec::new(),
+            stored: ordinary,
+        }
+    }
+}
+
+fn train_artifact_dictionary(
+    payload: &[u8],
+    entries: &[CanonicalEntry],
+    options: &ArtifactOptions,
+) -> Option<Vec<u8>> {
+    if options.dictionary == ArtifactDictionary::None {
+        return None;
+    }
+    let mut training_samples = Vec::new();
+    let mut sampled_bytes = 0_usize;
+    for entry in entries {
+        if entry.kind != ArtifactEntryKind::File || sampled_bytes >= MAX_DICTIONARY_TRAINING_BYTES {
+            continue;
+        }
+        let start = usize::try_from(entry.offset).ok()?;
+        let size = usize::try_from(entry.size).ok()?;
+        let available = MAX_DICTIONARY_TRAINING_BYTES.saturating_sub(sampled_bytes);
+        let length = size.min(MAX_DICTIONARY_SAMPLE_SIZE).min(available);
+        if length < 8 {
+            continue;
+        }
+        let end = start.checked_add(length)?;
+        training_samples.push(payload.get(start..end)?);
+        sampled_bytes = sampled_bytes.checked_add(length)?;
+    }
+    if training_samples.len() < MIN_DICTIONARY_SAMPLES {
+        return None;
+    }
+    let maximum = (sampled_bytes / 20).clamp(256, MAX_DICTIONARY_SIZE);
+    train_dictionary(&training_samples, maximum).ok()
+}
+
+fn metadata_flags(artifact: &Artifact, dictionary: &[u8]) -> u16 {
     (u16::from(artifact.suggested_name.is_some()) * FLAG_NAME)
         | (u16::from(artifact.suggested_path.is_some()) * FLAG_PATH)
+        | (u16::from(!dictionary.is_empty()) * FLAG_DICTIONARY)
 }
 
 fn validate_metadata(
@@ -994,6 +1138,11 @@ impl<'a> Cursor<'a> {
     }
 
     fn read_utf8(&mut self, length: usize) -> Result<&'a str, ArtifactTokenError> {
+        let bytes = self.read_bytes(length)?;
+        core::str::from_utf8(bytes).map_err(|_| ArtifactTokenError::InvalidUtf8)
+    }
+
+    fn read_bytes(&mut self, length: usize) -> Result<&'a [u8], ArtifactTokenError> {
         let end = self
             .offset
             .checked_add(length)
@@ -1003,7 +1152,7 @@ impl<'a> Cursor<'a> {
             .get(self.offset..end)
             .ok_or(ArtifactTokenError::UnexpectedEof)?;
         self.offset = end;
-        core::str::from_utf8(bytes).map_err(|_| ArtifactTokenError::InvalidUtf8)
+        Ok(bytes)
     }
 
     fn read_optional_string(&mut self) -> Result<Option<String>, ArtifactTokenError> {
@@ -1019,15 +1168,17 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use rebyte_compression::CompressionProfile;
+    use rebyte_compression::{CompressionProfile, compress_with_dictionary};
     use rebyte_format::{RelativeArtifactPath, SecurityLimits};
 
     use crate::DecodedArtifact;
 
     use super::{
-        ARTIFACT_HEADER_SIZE, Artifact, ArtifactCompression, ArtifactEntry, ArtifactKind,
-        ArtifactOptions, ArtifactTokenError, decode_artifact, decode_artifact_token,
-        encode_artifact, encode_artifact_token,
+        ARTIFACT_HEADER_SIZE, Artifact, ArtifactCompression, ArtifactDictionary, ArtifactEntry,
+        ArtifactKind, ArtifactOptions, ArtifactTokenError, CompressionAlgorithm, Digest32, Header,
+        canonicalize, content_digest, decode_artifact, decode_artifact_token, encode_artifact,
+        encode_artifact_token, encode_header, encode_manifest, envelope_digest, metadata_flags,
+        train_artifact_dictionary, usize_to_u32, usize_to_u64,
     };
 
     fn path(value: &str) -> Result<RelativeArtifactPath, ArtifactTokenError> {
@@ -1171,6 +1322,85 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn adaptive_dictionary_never_increases_complete_envelope() -> Result<(), ArtifactTokenError> {
+        let artifact = similar_directory_artifact()?;
+        let without = encode_artifact(
+            &artifact,
+            &ArtifactOptions::default()
+                .with_compression(ArtifactCompression::Zstd)
+                .with_dictionary(ArtifactDictionary::None),
+        )?;
+        let adaptive = encode_artifact(
+            &artifact,
+            &ArtifactOptions::default()
+                .with_compression(ArtifactCompression::Zstd)
+                .with_dictionary(ArtifactDictionary::Auto),
+        )?;
+        assert!(adaptive.binary().len() <= without.binary().len());
+        assert_eq!(
+            decode_artifact(adaptive.binary(), &SecurityLimits::SIMPLE_ARTIFACT)?.artifact(),
+            &artifact
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn embedded_dictionary_is_canonical_and_verified() -> Result<(), ArtifactTokenError> {
+        let artifact = similar_directory_artifact()?;
+        let options = ArtifactOptions::default().with_compression(ArtifactCompression::Zstd);
+        let (entries, payload) = canonicalize(&artifact, &options.limits)?;
+        let dictionary = train_artifact_dictionary(&payload, &entries, &options)
+            .ok_or(ArtifactTokenError::InvalidDictionary)?;
+        let stored = compress_with_dictionary(
+            &payload,
+            CompressionAlgorithm::Zstd,
+            options.profile,
+            &dictionary,
+            &options.limits,
+        )?;
+        let manifest = encode_manifest(&artifact, &dictionary, &entries, &options.limits)?;
+        let mut header = Header {
+            kind: ArtifactKind::Directory,
+            compression: CompressionAlgorithm::Zstd,
+            profile: options.profile,
+            flags: metadata_flags(&artifact, &dictionary),
+            entry_count: usize_to_u32(entries.len())?,
+            manifest_size: usize_to_u64(manifest.len())?,
+            original_size: usize_to_u64(payload.len())?,
+            stored_size: usize_to_u64(stored.len())?,
+            content_digest: content_digest(ArtifactKind::Directory, &entries),
+            envelope_digest: Digest32([0; 32]),
+        };
+        header.envelope_digest = envelope_digest(&header, &manifest, &stored);
+        let mut binary = encode_header(&header).to_vec();
+        binary.extend_from_slice(&manifest);
+        binary.extend_from_slice(&stored);
+        let decoded = decode_artifact(&binary, &SecurityLimits::SIMPLE_ARTIFACT)?;
+        assert_eq!(decoded.dictionary_size(), usize_to_u32(dictionary.len())?);
+        assert_eq!(decoded.artifact(), &artifact);
+        Ok(())
+    }
+
+    fn similar_directory_artifact() -> Result<Artifact, ArtifactTokenError> {
+        let mut entries = Vec::new();
+        for index in 0..64 {
+            let content = format!(
+                "{{\"schema\":\"rebyte-audit\",\"service\":\"worker-{index:03}\",\
+                 \"message\":\"portable reconstruction record\",\
+                 \"status\":\"verified\",\"sequence\":{index}}}\n"
+            )
+            .repeat(32)
+            .into_bytes();
+            entries.push(ArtifactEntry::file(
+                path(&format!("records/record-{index:03}.json"))?,
+                content,
+                false,
+            ));
+        }
+        Ok(Artifact::directory(entries))
     }
 
     proptest! {

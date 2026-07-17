@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use rebyte_core::{
-    ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactEntry, ArtifactEntryKind,
-    ArtifactIoError, ArtifactKind, ArtifactOptions, ArtifactPathMetadata, ArtifactTokenError,
-    CompressionProfile, DecodedArtifact, FileTokenError, StreamArtifactReport, decode_artifact,
-    decode_artifact_file, decode_artifact_file_expected, decode_artifact_token, decode_file_token,
-    encode_artifact, encode_artifact_path,
+    ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactDictionary, ArtifactEntry,
+    ArtifactEntryKind, ArtifactIoError, ArtifactKind, ArtifactOptions, ArtifactPathMetadata,
+    ArtifactTokenError, CompressionProfile, DecodedArtifact, FileTokenError, StreamArtifactReport,
+    decode_artifact, decode_artifact_file, decode_artifact_file_expected, decode_artifact_token,
+    decode_file_token, encode_artifact, encode_artifact_path,
 };
 use rebyte_format::{CompressionAlgorithm, RelativeArtifactPath, SecurityLimits};
 use serde::Serialize;
@@ -32,6 +32,9 @@ pub(super) struct EncodeCommand {
     /// Zstandard speed-versus-size policy.
     #[arg(long, value_enum, default_value = "balanced")]
     profile: ProfileArgument,
+    /// Train an embedded dictionary only when it reduces total artifact size.
+    #[arg(long, value_enum, default_value = "auto")]
+    dictionary: DictionaryArgument,
     /// Embed the source basename as an untrusted reconstruction hint.
     #[arg(long)]
     include_name: bool,
@@ -117,6 +120,21 @@ enum ProfileArgument {
     Maximum,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum DictionaryArgument {
+    Auto,
+    None,
+}
+
+impl DictionaryArgument {
+    const fn value(self) -> ArtifactDictionary {
+        match self {
+            Self::Auto => ArtifactDictionary::Auto,
+            Self::None => ArtifactDictionary::None,
+        }
+    }
+}
+
 impl ProfileArgument {
     const fn to_profile(self) -> CompressionProfile {
         match self {
@@ -182,6 +200,7 @@ pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
     let options = ArtifactOptions::default()
         .with_compression(command.compression.to_policy())
         .with_profile(command.profile.to_profile())
+        .with_dictionary(command.dictionary.value())
         .with_limits(limits);
     if command.format == RepresentationArgument::Binary && command.input.as_os_str() != "-" {
         return encode_binary_path(command, &options);
@@ -239,6 +258,7 @@ pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
         entries: encoded.entry_count(),
         original_bytes: encoded.original_size(),
         stored_bytes: encoded.stored_size(),
+        dictionary_bytes: encoded.dictionary_size(),
         representation: command.format.name(),
         output: command
             .output
@@ -282,6 +302,7 @@ fn encode_binary_path(command: &EncodeCommand, options: &ArtifactOptions) -> Res
         entries: streamed.entry_count(),
         original_bytes: streamed.original_size(),
         stored_bytes: streamed.stored_size(),
+        dictionary_bytes: streamed.dictionary_size(),
         representation: command.format.name(),
         output: Some(output.to_string_lossy().into_owned()),
         token: None,
@@ -368,6 +389,7 @@ fn emit_stream_decode_report(
         entries: streamed.entry_count(),
         reconstructed_bytes: streamed.original_size(),
         stored_bytes: streamed.stored_size(),
+        dictionary_bytes: streamed.dictionary_size(),
         compression: compression_name(streamed.compression()),
         suggested_name: streamed.suggested_name(),
         suggested_path: streamed.suggested_path().map(RelativeArtifactPath::as_str),
@@ -421,6 +443,7 @@ fn decode_artifact_command(
             .map_err(|_| CliError::new(EXIT_GENERIC, "artifact entry count overflow"))?,
         reconstructed_bytes: decoded.original_size(),
         stored_bytes: decoded.stored_size(),
+        dictionary_bytes: decoded.dictionary_size(),
         compression: compression_name(decoded.compression()),
         suggested_name: decoded.artifact().suggested_name(),
         suggested_path: decoded
@@ -1053,6 +1076,9 @@ fn print_encode_report(report: &EncodeReport<'_>) {
     println!("  Entries     {}", report.entries);
     println!("  Input       {} bytes", report.original_bytes);
     println!("  Stored      {} bytes", report.stored_bytes);
+    if report.dictionary_bytes != 0 {
+        println!("  Dictionary  {} bytes · embedded", report.dictionary_bytes);
+    }
     println!("  Format      {}", report.representation);
     println!("  Content ID  {}", report.content_digest);
     if let Some(output) = &report.output {
@@ -1070,6 +1096,9 @@ fn print_decode_report(report: &DecodeReport<'_>) {
     println!("  Entries     {}", report.entries);
     println!("  Bytes       {}", report.reconstructed_bytes);
     println!("  Compression {}", report.compression);
+    if report.dictionary_bytes != 0 {
+        println!("  Dictionary  {} bytes · verified", report.dictionary_bytes);
+    }
     println!("  Content ID  {}", report.content_digest);
     if let Some(name) = report.suggested_name {
         println!("  Name hint   {name}");
@@ -1104,6 +1133,7 @@ struct EncodeReport<'a> {
     entries: u32,
     original_bytes: u64,
     stored_bytes: u64,
+    dictionary_bytes: u32,
     representation: &'static str,
     output: Option<String>,
     token: Option<&'a str>,
@@ -1122,6 +1152,7 @@ struct DecodeReport<'a> {
     entries: u32,
     reconstructed_bytes: u64,
     stored_bytes: u64,
+    dictionary_bytes: u32,
     compression: &'static str,
     suggested_name: Option<&'a str>,
     suggested_path: Option<&'a str>,
