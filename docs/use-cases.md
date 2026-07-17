@@ -6,6 +6,23 @@ These examples show intended Rebyte deployment patterns. Rebyte transfers
 artifacts; it is not a package manager, remote executor or secret-distribution
 system.
 
+## One-file sharing without a trust decision
+
+For a local demo, test fixture or already trusted communication channel, create
+an unsigned file token without managing keys:
+
+```console
+rebyte encode notes.txt --output notes.rf1
+rebyte decode --file notes.rf1 --output restored-notes.txt
+rebyte hash notes.txt
+rebyte hash restored-notes.txt
+```
+
+The hashes must match and `decode` refuses a mutated token. This mode is not
+suitable for software updates or untrusted downloads because an attacker can
+replace both content and digest by producing another token. Use a signed RAP
+capsule in those cases.
+
 ## Air-gapped application release
 
 On the offline publisher workstation:

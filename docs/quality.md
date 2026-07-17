@@ -19,6 +19,12 @@ workspace and several critical modules are still below the 90%/95% targets, so
 the gap remains explicit release follow-up rather than being presented as
 completed security evidence.
 
+Rebyte 1.1.0 measures 77.10% workspace line coverage. The new File Token v1
+crate measures 83.85% and is additionally exercised by property, immutable
+vector, malformed-input, large-text process integration and fuzz tests. This is
+an improvement over 1.0.0, but it does not satisfy the long-term workspace or
+critical-module targets; those targets remain open quality work.
+
 Scheduled CI publishes `lcov.info` and Criterion estimates. Reviewers compare
 critical-operation medians against the most recent accepted artifact. A
 regression over 10% requires investigation; a regression over 20% blocks a

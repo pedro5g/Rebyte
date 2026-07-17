@@ -5,6 +5,26 @@ and releases follow Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-16
+
+### Added
+
+- Canonical `rf1_` unsigned single-file tokens with automatic bounded
+  Zstandard compression, embedded RAP file digest and byte-exact decoding.
+- Stable `encode_file_token` and `decode_file_token` Rust APIs through
+  `rebyte-core`.
+- `encode` and `decode` CLI workflows for files, stdin, token files and stable
+  JSON reports without key management.
+- `shell-env` generation for Fish, Bash, Zsh and PowerShell.
+- Immutable vectors, property tests, large-text integration coverage and a
+  dedicated file-token fuzz target.
+
+### Fixed
+
+- Close Windows transaction directory handles before cleanup and propagate
+  cleanup failures, preventing partially removed journals from surfacing as
+  `Io(NotFound)`.
+
 ## [1.0.0] - 2026-07-16
 
 ### Added

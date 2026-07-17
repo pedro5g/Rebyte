@@ -2,10 +2,12 @@
 
 #![forbid(unsafe_code)]
 
+mod file_token_command;
 mod hash_command;
 mod keys;
 mod producer;
 mod security_io;
+mod shell_env;
 mod ui;
 
 use std::fmt;
@@ -55,9 +57,9 @@ const DEVELOPMENT_PUBLIC_KEY: [u8; 32] = [
 #[command(
     name = "rebyte",
     version,
-    about = "Securely pack, sign, verify and reconstruct RAP v1 capsules",
-    long_about = "Rebyte creates and consumes deterministic, signed RAP v1 capsules without network access, command execution or lifecycle hooks.",
-    after_help = "Start here: rebyte key generate --name 'My publisher'\nThen run:   rebyte pack --root ./artifact --private-key rebyte-private-key.json -o release.rbc --producer my-build",
+    about = "Reconstruct files exactly with simple tokens or signed RAP capsules",
+    long_about = "Rebyte creates byte-exact unsigned file tokens and deterministic signed RAP v1 capsules without network access, command execution or lifecycle hooks.",
+    after_help = "Simple: rebyte encode FILE > file.rf1\n        rebyte decode --file file.rf1 -o COPY\nSigned: rebyte key generate --name 'My publisher'",
     styles = CLI_STYLES
 )]
 struct Cli {
@@ -67,6 +69,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Encode one file as an unsigned, compressed and integrity-checked token.
+    Encode(file_token_command::EncodeCommand),
+    /// Verify and reconstruct one unsigned file token byte for byte.
+    Decode(file_token_command::DecodeCommand),
     /// Pack a directory, sign it and self-verify the resulting capsule.
     Pack(producer::PackCommand),
     /// Compute or check a domain-separated RAP file digest.
@@ -89,6 +95,8 @@ enum Commands {
     Rollback(RecoveryCommand),
     /// Report local Rebyte capabilities and trust configuration.
     Doctor(DoctorCommand),
+    /// Print shell code that exports the absolute Rebyte path as `$REBYTE`.
+    ShellEnv(shell_env::ShellEnvCommand),
     /// Generate shell completion definitions.
     Completions {
         /// Target shell.
@@ -225,6 +233,8 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), CliError> {
     match Cli::parse().command {
+        Commands::Encode(command) => file_token_command::encode(&command),
+        Commands::Decode(command) => file_token_command::decode(&command),
         Commands::Pack(command) => producer::run(&command),
         Commands::Hash(command) => hash_command::run(&command),
         Commands::Key(command) => keys::run(&command),
@@ -236,6 +246,7 @@ fn run() -> Result<(), CliError> {
         Commands::Resume(command) => resume(&command),
         Commands::Rollback(command) => rollback(&command),
         Commands::Doctor(command) => doctor(&command),
+        Commands::ShellEnv(command) => shell_env::run(&command),
         Commands::Completions { shell } => {
             generate(shell, &mut Cli::command(), "rebyte", &mut io::stdout());
             Ok(())

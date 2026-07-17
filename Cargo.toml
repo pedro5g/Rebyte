@@ -6,6 +6,7 @@ members = [
     "crates/rebyte-codec",
     "crates/rebyte-integrity",
     "crates/rebyte-compression",
+    "crates/rebyte-file-token",
     "crates/rebyte-signature",
     "crates/rebyte-pack",
     "crates/rebyte-verify",
@@ -45,7 +46,7 @@ getrandom = "0.4"
 rpassword = "7.5"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.97"
 authors = ["Pedro Martins (pedro5g)"]

@@ -23,6 +23,14 @@ No target path is written before step 10. Controlled staging and journal data
 may be created below the reserved `.rebyte/` directory and are removed after a
 successful transaction.
 
+An unsigned `rf1_` file token follows a smaller, separate pipeline: bound text,
+validate canonical Base64URL, parse its fixed 56-byte header, enforce exact
+stored and reconstructed lengths, decompress within limits, compare the
+domain-separated file digest, and only then return bytes. `decode` creates a
+new output exclusively after this pipeline succeeds. There is deliberately no
+publisher or trust-policy step, so this mode must not authorize installation
+or execution.
+
 ## Cryptographic domains
 
 RAP v1 uses BLAKE3 derive-key mode with these exact context strings:
@@ -78,7 +86,8 @@ run can inspect, roll back or resume the persisted transaction.
 | Compression ratio | 200:1 |
 
 Applications may lower these values. Raising them is a local policy decision;
-the capsule cannot change them.
+the capsule or file token cannot change them. File Token v1 shares the text,
+decoded-input, compressed-payload, single-file and compression-ratio limits.
 
 ## Unsafe and dependencies
 

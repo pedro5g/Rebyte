@@ -6,7 +6,9 @@ Copyright (c) 2026 Pedro Martins (pedro5g)
 
 Rebyte protects the bytes and portable metadata of files reconstructed below a
 root directory selected by the local user. It also protects the authenticity
-of the publisher and the integrity of the capsule presented to the CLI.
+of the publisher and the integrity of signed capsules presented to the CLI.
+Unsigned `rf1_` tokens protect reconstruction integrity only and make no
+authenticity claim.
 
 ## Trust boundaries
 
@@ -21,10 +23,10 @@ of the publisher and the integrity of the capsule presented to the CLI.
 ## In-scope attackers
 
 The implementation assumes an attacker can truncate, extend or mutate any
-capsule byte; forge lengths and offsets; exploit integer conversion; submit
-compression bombs; inject terminal controls; race filesystem paths; create
-links; interrupt the process at any transaction state; and replay a correctly
-signed capsule.
+capsule or file-token byte; forge lengths and offsets; exploit integer
+conversion; submit compression bombs; inject terminal controls; race
+filesystem paths; create links; interrupt the process at any transaction state;
+and replay a correctly signed capsule.
 
 ## Security objectives
 
@@ -35,6 +37,7 @@ signed capsule.
 5. Make each file replacement atomic and a multi-file operation recoverable.
 6. Reconstruct file content exactly and verify it after the final write.
 7. Produce deterministic RAP v1 bytes for identical inputs and options.
+8. Never represent an unsigned file token as authenticated or trusted.
 
 ## Explicit non-goals
 
@@ -46,6 +49,7 @@ signed capsule.
   user, malicious dependency or physical storage failure.
 - Proving generated source code is safe to compile or execute.
 - Deleting files in RAP v1.
+- Authenticating the author, freshness or authorization of an `rf1_` token.
 
 ## Abuse cases required in tests
 

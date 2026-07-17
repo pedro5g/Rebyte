@@ -250,6 +250,8 @@ fn version_and_every_command_expose_help() -> Result<(), Box<dyn std::error::Err
     assert!(stdout_text(&version).starts_with("rebyte "));
 
     for command in [
+        "encode",
+        "decode",
         "pack",
         "hash",
         "key",
@@ -261,6 +263,7 @@ fn version_and_every_command_expose_help() -> Result<(), Box<dyn std::error::Err
         "resume",
         "rollback",
         "doctor",
+        "shell-env",
         "completions",
     ] {
         let help = rebyte().args([command, "-h"]).output()?;

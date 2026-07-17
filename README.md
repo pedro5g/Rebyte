@@ -4,17 +4,19 @@
 [![Security audit](https://github.com/pedro5g/Rebyte/actions/workflows/scheduled.yml/badge.svg)](https://github.com/pedro5g/Rebyte/actions/workflows/scheduled.yml)
 [![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Rebyte is an offline artifact delivery tool. It packages a directory into a
-deterministic RAP v1 capsule, authenticates the capsule with Ed25519 and
-reconstructs every file only after bounded parsing, trust-policy verification,
-decompression and byte-level integrity checks.
+Rebyte is an offline byte-exact reconstruction tool. Its simple mode turns one
+file into a compressed, integrity-checked `rf1_` token without keys. Its
+authenticated mode packages a directory into a deterministic RAP v1 capsule,
+signs it with Ed25519 and reconstructs files only after bounded parsing,
+trust-policy verification, decompression and byte-level integrity checks.
 
-Rebyte 1.0 provides a stable CLI and Rust API. It performs no network access,
+Rebyte 1.1 provides a stable CLI and Rust API. It performs no network access,
 command execution, lifecycle hooks or generated-code interpretation.
 
 ## Why Rebyte
 
 - exact byte-for-byte reconstruction with domain-separated BLAKE3 digests;
+- one-command unsigned file tokens for local transport and reproducible demos;
 - canonical binary encoding independent of `serde` or a language runtime;
 - explicit publisher trust using production, staging and development channels;
 - encrypted offline signing keys and distributable public trust documents;
@@ -39,6 +41,32 @@ cargo install --locked --path crates/rebyte-cli
 rebyte --version
 rebyte doctor
 ```
+
+### One file without keys
+
+Use an unsigned File Token when you only need portable bytes plus corruption
+detection and do not need to authenticate who produced them:
+
+```console
+rebyte encode ./original.txt --output original.rf1
+rebyte decode --file original.rf1 --output ./copy.txt
+cmp ./original.txt ./copy.txt
+```
+
+For short tokens, pass the string directly. In Fish:
+
+```fish
+rebyte shell-env fish | source
+set TOKEN ($REBYTE encode ./original.txt)
+$REBYTE decode "$TOKEN" --output ./copy.txt
+```
+
+`rf1_` is not a signature. Anyone can create a different internally valid
+token. Use the signed workflow below for releases, deployments or any input
+crossing a trust boundary. The complete format and verification order are in
+[File Token v1](schemas/file-token-v1.md).
+
+### Signed publisher workflow
 
 Prepare a passphrase file outside the artifact tree. Interactive use may omit
 `--passphrase-file`; Rebyte will prompt twice without echoing the passphrase.
@@ -105,6 +133,8 @@ use terminal-aware color; redirected output and `NO_COLOR` remain plain.
 
 | Command | Purpose |
 |---|---|
+| `encode` | Turn one file into an unsigned compressed `rf1_` token |
+| `decode` | Verify integrity and reconstruct an unsigned token into a new file |
 | `key generate` | Create a random encrypted private key and public trust document |
 | `key inspect` | Validate and display a public key, fingerprint, channel and status |
 | `key status` | Produce an active, retired or revoked public trust document |
@@ -117,6 +147,7 @@ use terminal-aware color; redirected output and `NO_COLOR` remain plain.
 | `transactions` | List retained or interrupted transactions |
 | `resume` / `rollback` | Recover an interrupted transaction explicitly |
 | `doctor` | Report version, platform, trust keys and apply capability |
+| `shell-env` | Export the absolute executable path as `REBYTE` for the selected shell |
 | `completions` | Generate Bash, Zsh, Fish, Elvish or `PowerShell` completions |
 
 The full syntax, JSON schemas, stdin behavior and exit-code contract are in
@@ -205,6 +236,11 @@ document. Do not merely remove a compromised key when operators need a clear
 result is a domain-separated BLAKE3 digest using context `rebyte:v1:file`; it
 is intentionally different from a generic `b3sum` of the same bytes.
 
+A digest verifies bytes but cannot reconstruct them: infinitely many possible
+files must map into the finite 256-bit digest space. Use `encode` when the
+result must carry enough information to recreate the file, and `hash` when the
+bytes already exist and only comparison is required.
+
 ```console
 rebyte hash ./artifact/config.toml
 rebyte hash ./artifact/config.toml --json
@@ -216,6 +252,34 @@ A successful `--check` exits with code 0. A mismatch exits with code 5 and
 prints both expected and computed digests without changing any file. Capsule
 root digests are shown by `pack`, `inspect` and `verify`; they cover the fixed
 header, canonical manifest and compressed payload, not the final signature.
+
+## Shell setup
+
+`shell-env` resolves the running executable to an absolute path and emits one
+quoted assignment. Apply it to the current shell:
+
+```fish
+# Fish
+./target/release/rebyte shell-env fish | source
+$REBYTE --version
+```
+
+```bash
+# Bash
+eval "$(./target/release/rebyte shell-env bash)"
+
+# Zsh
+eval "$(./target/release/rebyte shell-env zsh)"
+```
+
+```powershell
+# PowerShell
+./target/release/rebyte.exe shell-env powershell | Invoke-Expression
+& $env:REBYTE --version
+```
+
+The generated variable is `REBYTE`; it is exported for child processes. Shell
+completion generation remains separate through `rebyte completions SHELL`.
 
 ## Recovery
 
@@ -267,6 +331,26 @@ must ignore unknown fields and check `schemaVersion` before interpretation.
 
 `rebyte-core` is the stable consumer and producer facade. Only a
 `FullyVerifiedCapsule` can reach diff or filesystem application APIs.
+
+Unsigned single-file tokens are available through a small byte-slice API:
+
+```rust
+use rebyte_core::{
+    FileTokenOptions, SecurityLimits, decode_file_token, encode_file_token,
+};
+
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+let original = b"byte-exact content\n";
+let encoded = encode_file_token(original, &FileTokenOptions::default())?;
+let decoded = decode_file_token(encoded.token(), &SecurityLimits::V1)?;
+assert_eq!(decoded.bytes(), original);
+# Ok(())
+# }
+```
+
+The decoded API labels this data by type but deliberately provides no
+publisher identity. Its digest is integrity metadata, not an authenticity
+decision.
 
 ```rust,no_run
 use std::path::Path;
@@ -340,7 +424,7 @@ benchmarks. Current measured targets and baselines are documented in
 
 ## Security
 
-No software is “100% secure”. Rebyte 1.0 provides a stable, fail-closed design
+No software is “100% secure”. Rebyte 1.1 provides a stable, fail-closed design
 and adversarial tests, but has not claimed an independent security audit.
 Report suspected vulnerabilities privately according to
 [SECURITY.md](SECURITY.md); never attach production keys or secret material to

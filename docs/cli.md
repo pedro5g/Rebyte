@@ -21,7 +21,43 @@ rebyte help verify
 - `--json` writes one schema-versioned JSON object to stdout.
 - diagnostic errors go to stderr and never include private keys, passphrases,
   capsule tokens or file content.
-- existing key and capsule output files are never overwritten.
+- existing key, capsule, token and reconstructed output files are never
+  overwritten.
+- `rf1_` file tokens provide integrity without publisher authentication;
+  `rb1_` RAP tokens require signature and trust verification.
+
+## Simple file tokens
+
+### `encode`
+
+```text
+rebyte encode PATH|- [--compression auto|zstd|none]
+  [--output PATH] [--json]
+```
+
+Without `--output`, the command writes only the `rf1_` token and a newline to
+stdout, making command substitution safe. `auto` tries deterministic
+Zstandard and keeps it only when its payload is smaller. Input is a bounded
+regular no-follow file or bounded stdin. With `--output`, the destination is
+created exclusively and receives one newline-terminated token.
+
+### `decode`
+
+```text
+rebyte decode TOKEN --output PATH [--json]
+rebyte decode --file TOKEN_FILE --output PATH [--json]
+rebyte decode - --output PATH [--json]
+```
+
+Decode validates canonical Base64URL, the fixed header, declared lengths,
+compression limits and the embedded domain-separated digest before creating
+the output. Existing outputs are never replaced. Successful reports say
+`authenticated: false`: the token proves internal consistency, not authorship.
+
+For large tokens prefer `--file` or stdin; operating systems impose different
+command-line length limits. Compression effectiveness depends on input
+redundancy. Base64URL and the fixed header can make incompressible small files
+larger than their source.
 
 ## Publisher commands
 
@@ -145,6 +181,20 @@ rebyte doctor \
 
 Reports Rebyte/RAP versions, platform, configured keys by channel and
 filesystem-apply availability. It does not contact a network or mutate trust.
+
+### `shell-env`
+
+```console
+rebyte shell-env bash
+rebyte shell-env zsh
+rebyte shell-env fish
+rebyte shell-env powershell
+```
+
+Prints a safely quoted assignment of the absolute running binary path to the
+exported `REBYTE` variable. A subprocess cannot mutate its parent shell, so
+evaluate the output with `eval`, Fish `source`, or PowerShell
+`Invoke-Expression`, as shown in the README.
 
 ### `completions`
 

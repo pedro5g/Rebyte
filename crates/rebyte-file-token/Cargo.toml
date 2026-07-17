@@ -1,0 +1,25 @@
+[package]
+name = "rebyte-file-token"
+description = "Bounded unsigned single-file tokens with byte-exact reconstruction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["encoding", "compression", "integrity"]
+categories = ["encoding", "compression"]
+
+[dependencies]
+base64.workspace = true
+rebyte-compression = { path = "../rebyte-compression", version = "1.0.0" }
+rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
+rebyte-integrity = { path = "../rebyte-integrity", version = "1.0.0" }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
