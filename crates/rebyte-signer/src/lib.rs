@@ -1,8 +1,9 @@
-//! Explicitly development-only Ed25519 signing adapters.
+//! Offline encrypted and explicitly development-only Ed25519 signing adapters.
 //!
-//! This crate is not a production key-management implementation. It performs
-//! no network access and contains no embedded private key. Production signing
-//! should implement [`Signer`] against a separately reviewed KMS or HSM adapter.
+//! This crate performs no network access and contains no embedded private key.
+//! [`EncryptedPrivateKeyDocument`] supports offline local signing; high-value
+//! production deployments should still implement [`Signer`] against a
+//! separately reviewed KMS or HSM adapter.
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +16,13 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::SigningKey;
 pub use rebyte_signature::Signer;
 use zeroize::Zeroizing;
+
+mod key_file;
+
+pub use key_file::{
+    EncryptedPrivateKeyDocument, KeyDocumentError, LocalKeySigner, PublicKeyDocument,
+    generate_encrypted_key,
+};
 
 const SECRET_BYTES: usize = 32;
 

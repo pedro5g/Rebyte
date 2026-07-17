@@ -1,6 +1,6 @@
 [package]
 name = "rebyte-signer"
-description = "Restricted development signing adapters for Rebyte capsules"
+description = "Encrypted local and restricted development signing adapters for Rebyte"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,13 +11,20 @@ homepage.workspace = true
 publish = false
 
 [dependencies]
+argon2.workspace = true
 base64.workspace = true
+chacha20poly1305.workspace = true
 ed25519-dalek.workspace = true
+getrandom.workspace = true
+rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+rebyte-integrity = { path = "../rebyte-integrity", version = "0.1.0" }
 rebyte-signature = { path = "../rebyte-signature", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-rebyte-integrity = { path = "../rebyte-integrity", version = "0.1.0" }
+tempfile.workspace = true
 
 [lints]
 workspace = true
