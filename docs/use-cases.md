@@ -9,11 +9,11 @@ system.
 ## One-file sharing without a trust decision
 
 For a local demo, test fixture or already trusted communication channel, create
-an unsigned file token without managing keys:
+an unsigned artifact without managing keys:
 
 ```console
-rebyte encode notes.txt --output notes.rf1
-rebyte decode --file notes.rf1 --output restored-notes.txt
+rebyte encode notes.txt --output notes.ra1
+rebyte decode --file notes.ra1 --output restored-notes.txt
 rebyte hash notes.txt
 rebyte hash restored-notes.txt
 ```
@@ -88,6 +88,29 @@ rebyte diff --file baseline.rbc \
 ```
 
 Text changes receive line summaries, while binary changes remain content-safe.
+
+## Emergency logical configuration change
+
+When a locally customized TOML file needs one controlled field change, bind a
+semantic patch to the exact current digest and retain unrelated comments:
+
+```console
+rebyte hash ./service.toml
+rebyte patch create --format toml \
+  --target-digest "$CURRENT_RAP_DIGEST" \
+  --operation 'test:/server/port=80' \
+  --operation 'set:/server/port=8080' \
+  --output port-emergency.rbp.json
+
+rebyte patch apply port-emergency.rbp.json \
+  --target ./service.toml --dry-run
+rebyte patch apply port-emergency.rbp.json \
+  --target ./service.toml --yes --backup
+```
+
+Use semantic patches only as local reviewed instructions. For authenticated
+distribution, apply the change in a controlled publisher workspace and package
+the resulting exact configuration in a signed capsule.
 
 ## Firmware or binary assets
 

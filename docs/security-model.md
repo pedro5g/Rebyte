@@ -37,6 +37,23 @@ is bounded, covered by the envelope digest, permitted only for Zstandard and
 never loaded from a destination or external path. Encoders retain a trained
 candidate only after measuring a net reduction including its manifest cost.
 
+## Semantic patch boundary
+
+Semantic Patch v1 is a separate unsigned local format. The parser accepts at
+most 2 `MiB`, 512 operations, 64 pointer components and 1024 pointer bytes.
+Unknown fields, duplicate JSON object keys, invalid pointer escapes and
+unsupported TOML array paths are rejected. Values are data only: no expression,
+template, command, environment interpolation, network or lifecycle hook is
+evaluated.
+
+Application opens the existing regular target without following symlinks,
+checks an optional RAP file digest and ordered semantic `test` operations,
+serializes in memory, stages beside the target, revalidates the original
+digest, and replaces one file atomically. The result is reopened and hashed.
+An optional backup is created exclusively and never overwritten. This provides
+safe local preconditions and crash resistance for one file, not publisher
+authentication or a multi-file transaction.
+
 ## Cryptographic domains
 
 RAP v1 uses BLAKE3 derive-key mode with these exact context strings:

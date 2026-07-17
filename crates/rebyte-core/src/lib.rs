@@ -23,6 +23,11 @@ pub use rebyte_file_token::{
 };
 pub use rebyte_format::{PROTOCOL_VERSION, SecurityLimits};
 pub use rebyte_pack::{ArtifactFile, PackError, PackOptions, UnsignedCapsule, pack};
+pub use rebyte_semantic::{
+    MAX_OPERATIONS as MAX_SEMANTIC_OPERATIONS, MAX_PATCH_BYTES, MAX_POINTER_BYTES,
+    MAX_POINTER_DEPTH, PatchFormat, PatchOperation, SemanticError, SemanticPatch,
+    SemanticPatchResult, apply_semantic_patch, parse_patch,
+};
 pub use rebyte_signature::{
     KeyStatus, Signer, TrustChannel, TrustedKeyring, TrustedPublicKey, VerificationPolicy,
     VerifiedPublisher,

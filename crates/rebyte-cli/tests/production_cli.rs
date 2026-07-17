@@ -254,6 +254,7 @@ fn version_and_every_command_expose_help() -> Result<(), Box<dyn std::error::Err
         "decode",
         "pack",
         "hash",
+        "patch",
         "key",
         "inspect",
         "verify",
@@ -279,6 +280,14 @@ fn version_and_every_command_expose_help() -> Result<(), Box<dyn std::error::Err
         assert!(
             stdout_text(&help).contains("Usage:"),
             "key help missing for {command}"
+        );
+    }
+    for command in ["create", "inspect", "apply"] {
+        let help = rebyte().args(["patch", command, "-h"]).output()?;
+        assert_success(&help);
+        assert!(
+            stdout_text(&help).contains("Usage:"),
+            "patch help missing for {command}"
         );
     }
     let completions = rebyte().args(["completions", "bash"]).output()?;

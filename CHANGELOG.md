@@ -17,6 +17,11 @@ and releases follow Semantic Versioning.
   inputs up to the explicit large-artifact policy, without full-file memory
   allocation.
 - `--limits large` support for binary `encode`, `decode` and streaming `hash`.
+- Strict Semantic Patch v1 documents with ordered `test`, `set` and `remove`
+  operations for JSON and comment-preserving TOML.
+- `patch create`, `patch inspect` and `patch apply` with digest preconditions,
+  dry-run diffs, no-follow targets, exclusive backups, atomic replacement and
+  post-write verification.
 
 ### Fixed
 

@@ -7,6 +7,7 @@ mod hash_command;
 mod keys;
 mod producer;
 mod security_io;
+mod semantic_command;
 mod shell_env;
 mod ui;
 
@@ -77,6 +78,8 @@ enum Commands {
     Pack(producer::PackCommand),
     /// Compute or check a domain-separated RAP file digest.
     Hash(hash_command::HashCommand),
+    /// Create, inspect or safely apply structured JSON/TOML patches.
+    Patch(semantic_command::PatchCommand),
     /// Generate and manage publisher key documents.
     Key(keys::KeyCommand),
     /// Inspect bounded capsule metadata; verification status is reported separately.
@@ -237,6 +240,7 @@ fn run() -> Result<(), CliError> {
         Commands::Decode(command) => file_token_command::decode(&command),
         Commands::Pack(command) => producer::run(&command),
         Commands::Hash(command) => hash_command::run(&command),
+        Commands::Patch(command) => semantic_command::run(&command),
         Commands::Key(command) => keys::run(&command),
         Commands::Inspect(command) => inspect(&command),
         Commands::Verify(command) => verify(&command),

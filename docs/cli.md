@@ -144,6 +144,54 @@ Computes the domain-separated RAP file digest incrementally. `--check` expects
 exactly 64 lowercase hexadecimal characters. `large` raises only the bounded
 streaming byte limit; it does not change the algorithm or digest.
 
+## Semantic patch commands
+
+### `patch create`
+
+```text
+rebyte patch create --format json|toml
+  --operation EXPRESSION [--operation EXPRESSION ...]
+  [--target-digest LOWERCASE_HEX] --output PATCH [--json]
+```
+
+Expressions are evaluated in command order:
+
+- `test:/pointer=JSON` requires an existing semantic value;
+- `set:/pointer=JSON` inserts or replaces below an existing parent;
+- `remove:/pointer` removes an existing value.
+
+Values use JSON syntax even when the target is TOML, so strings retain their
+JSON quotes. The patch output is strict, versioned JSON and is created
+exclusively.
+
+### `patch inspect`
+
+```text
+rebyte patch inspect PATCH [--json]
+```
+
+Bounds the document to 2 `MiB`, rejects duplicate keys and unknown fields, and
+validates the version, format, digest, operation count and every pointer. It
+does not read or change a target.
+
+### `patch apply`
+
+```text
+rebyte patch apply PATCH --target FILE
+  [--dry-run | --yes] [--backup] [--json]
+```
+
+The target is opened without following symlinks and bounded to 64 `MiB`.
+Without `--yes`, Rebyte prints a sanitized line diff and defaults confirmation
+to “no”. `--dry-run` never writes. `--backup` exclusively creates
+`<target>.rebyte.bak` with the original bytes and permissions.
+
+Before commit, Rebyte verifies the optional exact digest and ordered semantic
+tests, stages serialized output beside the target, rechecks the target digest,
+atomically replaces that one file, synchronizes it and verifies the committed
+digest. Existing backup names, stale targets and concurrent changes fail
+closed. JSON arrays are supported; TOML operations are table-key paths in v1.
+
 ## Consumer commands
 
 ### `inspect`

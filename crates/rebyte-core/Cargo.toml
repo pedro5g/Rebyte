@@ -19,6 +19,7 @@ rebyte-diff = { path = "../rebyte-diff", version = "1.0.0" }
 rebyte-file-token = { path = "../rebyte-file-token", version = "1.0.0" }
 rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
 rebyte-pack = { path = "../rebyte-pack", version = "1.0.0" }
+rebyte-semantic = { path = "../rebyte-semantic", version = "1.0.0" }
 rebyte-signature = { path = "../rebyte-signature", version = "1.0.0" }
 rebyte-verify = { path = "../rebyte-verify", version = "1.0.0" }
 

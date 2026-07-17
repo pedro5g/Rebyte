@@ -170,6 +170,7 @@ use terminal-aware color; redirected output and `NO_COLOR` remain plain.
 | `key status` | Produce an active, retired or revoked public trust document |
 | `pack` | Read a directory without following symlinks, sign and self-verify a capsule |
 | `hash` | Compute or check the RAP file-domain BLAKE3 digest |
+| `patch` | Create, inspect, preview and atomically apply JSON/TOML semantic patches |
 | `inspect` | Parse bounded metadata; unverified data is labelled as such |
 | `verify` | Verify encoding, publisher, signature, payload and every file |
 | `diff` | Compare a verified capsule with a root without writing |
@@ -284,6 +285,51 @@ A successful `--check` exits with code 0. A mismatch exits with code 5 and
 prints both expected and computed digests without changing any file. Capsule
 root digests are shown by `pack`, `inspect` and `verify`; they cover the fixed
 header, canonical manifest and compressed payload, not the final signature.
+
+## Emergency semantic patches
+
+Semantic patches change a logical JSON or TOML field without replacing every
+source byte. They are useful when local comments or unrelated configuration
+must survive an emergency change.
+
+Create a patch bound to the exact current file:
+
+```fish
+set TARGET ./service.toml
+set EXPECTED (rebyte hash "$TARGET" | string split ' ' | head -n 1)
+
+rebyte patch create \
+  --format toml \
+  --target-digest "$EXPECTED" \
+  --operation 'test:/server/port=80' \
+  --operation 'set:/server/port=8080' \
+  --operation 'remove:/server/legacy' \
+  --output emergency.rbp.json
+```
+
+Review, preview and apply it:
+
+```console
+rebyte patch inspect emergency.rbp.json
+rebyte patch apply emergency.rbp.json \
+  --target ./service.toml --dry-run
+rebyte patch apply emergency.rbp.json \
+  --target ./service.toml --yes --backup
+```
+
+Paths use RFC 6901 JSON Pointer (`/server/port`; encode `~` as `~0` and `/`
+inside a key as `~1`). JSON supports object keys and array indexes, with `-`
+appending to an array. TOML v1 intentionally addresses table keys only so
+comments and surrounding layout remain predictable. The apply command rejects
+duplicate JSON keys, symlinks, stale digests, failed `test` operations,
+existing backups and concurrent target changes. It stages on the same
+filesystem, preserves permissions, atomically replaces one file and verifies
+the committed digest.
+
+Semantic patches are unsigned local instructions: integrity and preconditions
+do not authenticate an author. Treat externally received patches as untrusted,
+or distribute the resulting exact file through a signed capsule. See the
+[semantic patch specification](schemas/semantic-patch-v1.md).
 
 ## Shell setup
 

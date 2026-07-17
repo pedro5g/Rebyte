@@ -33,6 +33,7 @@ rebyte-verify = { path = "../rebyte-verify", version = "1.0.0" }
 rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+similar.workspace = true
 tempfile.workspace = true
 zeroize.workspace = true
 

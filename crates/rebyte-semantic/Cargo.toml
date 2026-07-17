@@ -1,0 +1,24 @@
+[package]
+name = "rebyte-semantic"
+description = "Bounded semantic JSON and TOML patching for Rebyte"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
+rebyte-integrity = { path = "../rebyte-integrity", version = "1.0.0" }
+serde.workspace = true
+serde_json.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
