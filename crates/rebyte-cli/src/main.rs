@@ -2,12 +2,19 @@
 
 #![forbid(unsafe_code)]
 
+mod hash_command;
+mod keys;
+mod producer;
+mod security_io;
+mod ui;
+
 use std::fmt;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use rebyte_core::{
@@ -34,6 +41,11 @@ const EXIT_POLICY: u8 = 7;
 const EXIT_UNSAFE_PATH: u8 = 8;
 const EXIT_CONFLICT: u8 = 9;
 const EXIT_TRANSACTION: u8 = 10;
+const CLI_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().bold())
+    .usage(AnsiColor::Green.on_default().bold())
+    .literal(AnsiColor::Cyan.on_default().bold())
+    .placeholder(AnsiColor::Yellow.on_default());
 const DEVELOPMENT_PUBLIC_KEY: [u8; 32] = [
     88, 147, 102, 4, 171, 218, 17, 43, 201, 73, 51, 86, 156, 130, 248, 208, 204, 13, 223, 146, 163,
     248, 50, 159, 47, 68, 143, 127, 72, 74, 89, 76,
@@ -43,8 +55,10 @@ const DEVELOPMENT_PUBLIC_KEY: [u8; 32] = [
 #[command(
     name = "rebyte",
     version,
-    about = "Verify and reconstruct signed Rebyte capsules",
-    disable_help_subcommand = true
+    about = "Securely pack, sign, verify and reconstruct RAP v1 capsules",
+    long_about = "Rebyte creates and consumes deterministic, signed RAP v1 capsules without network access, command execution or lifecycle hooks.",
+    after_help = "Start here: rebyte key generate --name 'My publisher'\nThen run:   rebyte pack --root ./artifact --private-key rebyte-private-key.json -o release.rbc --producer my-build",
+    styles = CLI_STYLES
 )]
 struct Cli {
     #[command(subcommand)]
@@ -53,6 +67,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Pack a directory, sign it and self-verify the resulting capsule.
+    Pack(producer::PackCommand),
+    /// Compute or check a domain-separated RAP file digest.
+    Hash(hash_command::HashCommand),
+    /// Generate and manage publisher key documents.
+    Key(keys::KeyCommand),
     /// Inspect bounded capsule metadata; verification status is reported separately.
     Inspect(ReadCommand),
     /// Verify structure, publisher, signature and every reconstructed file.
@@ -68,11 +88,7 @@ enum Commands {
     /// Restore the original state from an interrupted or retained transaction.
     Rollback(RecoveryCommand),
     /// Report local Rebyte capabilities and trust configuration.
-    Doctor {
-        /// Emit stable JSON instead of terminal text.
-        #[arg(long)]
-        json: bool,
-    },
+    Doctor(DoctorCommand),
     /// Generate shell completion definitions.
     Completions {
         /// Target shell.
@@ -158,6 +174,16 @@ struct RecoveryCommand {
 }
 
 #[derive(Debug, Args)]
+struct DoctorCommand {
+    /// Load a public trust document when checking the local configuration.
+    #[arg(long = "trusted-key", value_name = "PATH")]
+    trusted_keys: Vec<PathBuf>,
+    /// Emit stable JSON instead of terminal text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct InputArgs {
     /// `rb1_` token, or `-` to read a token from standard input.
     #[arg(value_name = "TOKEN", conflicts_with = "file")]
@@ -169,6 +195,9 @@ struct InputArgs {
 
 #[derive(Debug, Args)]
 struct TrustArgs {
+    /// Public trust document; repeat for key rotation or multiple publishers.
+    #[arg(long = "trusted-key", value_name = "PATH")]
+    trusted_keys: Vec<PathBuf>,
     /// Explicitly permit a non-production trust channel.
     #[arg(long = "trust-channel", value_enum)]
     channels: Vec<ChannelArgument>,
@@ -184,7 +213,11 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("rebyte: {}", sanitize_terminal(&error.to_string()));
+            eprintln!(
+                "{} {}",
+                ui::error("rebyte error:"),
+                sanitize_terminal(&error.to_string())
+            );
             ExitCode::from(error.exit_code)
         }
     }
@@ -192,6 +225,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), CliError> {
     match Cli::parse().command {
+        Commands::Pack(command) => producer::run(&command),
+        Commands::Hash(command) => hash_command::run(&command),
+        Commands::Key(command) => keys::run(&command),
         Commands::Inspect(command) => inspect(&command),
         Commands::Verify(command) => verify(&command),
         Commands::Diff(command) => diff(&command),
@@ -199,7 +235,7 @@ fn run() -> Result<(), CliError> {
         Commands::Transactions(command) => transactions(&command),
         Commands::Resume(command) => resume(&command),
         Commands::Rollback(command) => rollback(&command),
-        Commands::Doctor { json } => doctor(json),
+        Commands::Doctor(command) => doctor(&command),
         Commands::Completions { shell } => {
             generate(shell, &mut Cli::command(), "rebyte", &mut io::stdout());
             Ok(())
@@ -227,7 +263,7 @@ fn inspect(command: &ReadCommand) -> Result<(), CliError> {
 fn verify(command: &ReadCommand) -> Result<(), CliError> {
     let input = read_input(&command.input)?;
     let policy = trust_policy(&command.trust);
-    let keyring = development_keyring()?;
+    let keyring = trusted_keyring(&command.trust)?;
     let verified = verify_capsule(input.as_capsule_input(), &policy, &keyring)
         .map_err(CliError::verification)?;
     let report = VerificationReport::from_capsule(&verified);
@@ -242,7 +278,7 @@ fn verify(command: &ReadCommand) -> Result<(), CliError> {
 fn diff(command: &DiffCommand) -> Result<(), CliError> {
     let input = read_input(&command.input)?;
     let policy = trust_policy(&command.trust);
-    let keyring = development_keyring()?;
+    let keyring = trusted_keyring(&command.trust)?;
     let verified = verify_capsule(input.as_capsule_input(), &policy, &keyring)
         .map_err(CliError::verification)?;
     let report = diff_capsule(&verified, &command.root)
@@ -258,7 +294,7 @@ fn diff(command: &DiffCommand) -> Result<(), CliError> {
 fn apply(command: &ApplyCommand) -> Result<(), CliError> {
     let input = read_input(&command.input)?;
     let policy = trust_policy(&command.trust);
-    let keyring = development_keyring()?;
+    let keyring = trusted_keyring(&command.trust)?;
     let verified = verify_capsule(input.as_capsule_input(), &policy, &keyring)
         .map_err(CliError::verification)?;
     let changes = diff_capsule(&verified, &command.root)
@@ -268,7 +304,10 @@ fn apply(command: &ApplyCommand) -> Result<(), CliError> {
         if command.json {
             return write_json(&ApplyPreviewJson::from_report(&changes));
         }
-        println!("Dry run: capsule is fully verified; no files will be written.");
+        println!(
+            "{}",
+            ui::heading("Dry run · fully verified · no files will be written")
+        );
         print_diff(&changes);
         return Ok(());
     }
@@ -280,7 +319,10 @@ fn apply(command: &ApplyCommand) -> Result<(), CliError> {
                 reason: "cancelled",
             });
         }
-        println!("Application cancelled; no files were written.");
+        println!(
+            "{}",
+            ui::heading("Application cancelled · no files were written")
+        );
         return Ok(());
     }
     let report = apply_transaction(
@@ -367,8 +409,11 @@ fn print_apply_result(report: &ApplyReport, json: bool) -> Result<(), CliError> 
         write_json(&value)
     } else {
         println!(
-            "Applied {} verified files ({} bytes) in transaction {}.",
-            report.files_written, report.bytes_written, report.transaction_id
+            "{}",
+            ui::success(&format!(
+                "✓ Applied {} verified files ({} bytes) · transaction {}",
+                report.files_written, report.bytes_written, report.transaction_id
+            ))
         );
         if let Some(path) = &report.retained_backup {
             println!("Backup retained at {}.", path.display());
@@ -377,29 +422,45 @@ fn print_apply_result(report: &ApplyReport, json: bool) -> Result<(), CliError> 
     }
 }
 
-fn doctor(json: bool) -> Result<(), CliError> {
-    let keyring = development_keyring()?;
+fn doctor(command: &DoctorCommand) -> Result<(), CliError> {
+    let keys = trusted_keys(&command.trusted_keys)?;
+    let production_keys = keys
+        .iter()
+        .filter(|key| key.channel() == TrustChannel::Production)
+        .count();
+    let staging_keys = keys
+        .iter()
+        .filter(|key| key.channel() == TrustChannel::Staging)
+        .count();
+    let development_keys = keys
+        .iter()
+        .filter(|key| key.channel() == TrustChannel::Development)
+        .count();
     let report = DoctorReport {
         schema_version: 1,
         version: env!("CARGO_PKG_VERSION"),
         protocol_version: rebyte_core::PROTOCOL_VERSION,
         operating_system: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
-        production_keys: 0,
-        development_keys: u32::try_from(keyring.len())
+        production_keys: u32::try_from(production_keys)
+            .map_err(|_| CliError::new(EXIT_GENERIC, "key count overflow"))?,
+        staging_keys: u32::try_from(staging_keys)
+            .map_err(|_| CliError::new(EXIT_GENERIC, "key count overflow"))?,
+        development_keys: u32::try_from(development_keys)
             .map_err(|_| CliError::new(EXIT_GENERIC, "key count overflow"))?,
         filesystem_apply_available: true,
     };
-    if json {
+    if command.json {
         write_json(&report)
     } else {
-        println!("Rebyte {}", report.version);
+        println!("{}", ui::heading(&format!("Rebyte {}", report.version)));
         println!("Protocol: RAP v{}", report.protocol_version);
         println!(
             "Platform: {}-{}",
             report.operating_system, report.architecture
         );
         println!("Production keys: {}", report.production_keys);
+        println!("Staging keys: {} (explicit opt-in required)", report.staging_keys);
         println!(
             "Development keys: {} (explicit opt-in required)",
             report.development_keys
@@ -414,7 +475,7 @@ fn verify_structural_status(
     trust: &TrustArgs,
 ) -> Result<String, CliError> {
     let policy = trust_policy(trust);
-    let keyring = development_keyring()?;
+    let keyring = trusted_keyring(trust)?;
     let result = structural
         .clone()
         .verify_signature(&policy, &keyring)
@@ -425,15 +486,24 @@ fn verify_structural_status(
     })
 }
 
-fn development_keyring() -> Result<TrustedKeyring, CliError> {
-    let key = TrustedPublicKey::new(
+fn trusted_keyring(args: &TrustArgs) -> Result<TrustedKeyring, CliError> {
+    TrustedKeyring::new(trusted_keys(&args.trusted_keys)?).map_err(CliError::signature)
+}
+
+fn trusted_keys(paths: &[PathBuf]) -> Result<Vec<TrustedPublicKey>, CliError> {
+    let development = TrustedPublicKey::new(
         "Rebyte development test key",
         DEVELOPMENT_PUBLIC_KEY,
         TrustChannel::Development,
         KeyStatus::Active,
     )
     .map_err(CliError::signature)?;
-    TrustedKeyring::new(vec![key]).map_err(CliError::signature)
+    let mut keys = Vec::with_capacity(paths.len().saturating_add(1));
+    keys.push(development);
+    for path in paths {
+        keys.push(keys::load_trusted_key(path)?);
+    }
+    Ok(keys)
 }
 
 fn trust_policy(args: &TrustArgs) -> VerificationPolicy {
@@ -583,6 +653,7 @@ struct DoctorReport {
     operating_system: &'static str,
     architecture: &'static str,
     production_keys: u32,
+    staging_keys: u32,
     development_keys: u32,
     filesystem_apply_available: bool,
 }
@@ -740,7 +811,10 @@ struct RecoveryJson {
 }
 
 fn print_inspection(report: &InspectionReport) {
-    println!("Rebyte Capsule (structurally bounded, metadata may be untrusted)");
+    println!(
+        "{}",
+        ui::heading("Rebyte capsule · bounded structure · metadata may be untrusted")
+    );
     println!("Protocol: RAP v{}", report.protocol_version);
     println!("Compression: {}", report.compression);
     println!("Producer: {}", sanitize_terminal(&report.producer));
@@ -759,7 +833,7 @@ fn print_inspection(report: &InspectionReport) {
 }
 
 fn print_verification(report: &VerificationReport) {
-    println!("✓ Capsule valid");
+    println!("{}", ui::success("✓ Capsule fully verified"));
     println!("Publisher: {}", sanitize_terminal(&report.publisher));
     println!("Channel: {}", report.trust_channel);
     println!("Key ID: {}", report.key_id);

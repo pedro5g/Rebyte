@@ -247,6 +247,23 @@ impl PublicKeyDocument {
         self.channel.to_trust()
     }
 
+    /// Returns the local administrative status represented by the document.
+    #[must_use]
+    pub const fn status(&self) -> KeyStatus {
+        self.status.to_status()
+    }
+
+    /// Changes local trust status without changing the public-key identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyDocumentError::UnsupportedDocument`] for future status
+    /// variants unknown to this document version.
+    pub fn with_status(mut self, status: KeyStatus) -> Result<Self, KeyDocumentError> {
+        self.status = DocumentStatus::from_status(status)?;
+        Ok(self)
+    }
+
     /// Returns the public-key fingerprint.
     ///
     /// # Errors
@@ -403,6 +420,15 @@ enum DocumentStatus {
 }
 
 impl DocumentStatus {
+    const fn from_status(status: KeyStatus) -> Result<Self, KeyDocumentError> {
+        match status {
+            KeyStatus::Active => Ok(Self::Active),
+            KeyStatus::Retired => Ok(Self::Retired),
+            KeyStatus::Revoked => Ok(Self::Revoked),
+            _ => Err(KeyDocumentError::UnsupportedDocument),
+        }
+    }
+
     const fn to_status(self) -> KeyStatus {
         match self {
             Self::Active => KeyStatus::Active,
