@@ -14,3 +14,4 @@ and releases follow Semantic Versioning.
 - Domain-separated incremental BLAKE3 integrity primitives.
 - Bounded native and WebAssembly Zstandard decompression.
 - Ed25519 verification with explicit publisher channel and key status policy.
+- Deterministic artifact packager with canonical ordering and file digests.

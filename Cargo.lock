@@ -312,6 +312,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebyte-pack"
+version = "0.1.0"
+dependencies = [
+ "rebyte-codec",
+ "rebyte-compression",
+ "rebyte-format",
+ "rebyte-integrity",
+]
+
+[[package]]
 name = "rebyte-signature"
 version = "0.1.0"
 dependencies = [

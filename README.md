@@ -54,6 +54,10 @@ key ID in a local keyring. Production is the default channel; staging and
 development require explicit policy, while retired, revoked and unknown keys
 are rejected.
 
+`rebyte-pack` accepts only final bytes and validated relative paths. It sorts
+files by canonical UTF-8 path bytes, rejects duplicates, builds contiguous
+offsets, hashes each file and produces deterministic unsigned capsule material.
+
 ## License
 
 Licensed under either Apache License, Version 2.0 or the MIT license, at your
