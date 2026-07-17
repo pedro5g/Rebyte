@@ -994,6 +994,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebyte-artifact-token"
+version = "1.1.0"
+dependencies = [
+ "base64",
+ "proptest",
+ "rebyte-compression",
+ "rebyte-format",
+ "rebyte-integrity",
+]
+
+[[package]]
 name = "rebyte-cli"
 version = "1.1.0"
 dependencies = [
@@ -1042,6 +1053,7 @@ name = "rebyte-core"
 version = "1.1.0"
 dependencies = [
  "rebyte-apply",
+ "rebyte-artifact-token",
  "rebyte-diff",
  "rebyte-file-token",
  "rebyte-format",

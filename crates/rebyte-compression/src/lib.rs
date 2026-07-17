@@ -18,7 +18,6 @@ const MAXIMUM_WINDOW_LOG: u32 = 27;
 
 /// Reproducible speed-versus-size policy for native Zstandard encoding.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[non_exhaustive]
 pub enum CompressionProfile {
     /// Prefer encoding speed and low working memory.
     Fast,

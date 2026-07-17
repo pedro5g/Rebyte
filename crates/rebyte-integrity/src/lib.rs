@@ -17,6 +17,10 @@ pub const MANIFEST_CONTEXT: &str = "rebyte:v1:manifest";
 pub const PAYLOAD_CONTEXT: &str = "rebyte:v1:payload";
 /// BLAKE3 derive-key context for the signed capsule root.
 pub const CAPSULE_CONTEXT: &str = "rebyte:v1:capsule";
+/// BLAKE3 derive-key context for unsigned artifact content identities.
+pub const ARTIFACT_CONTENT_CONTEXT: &str = "rebyte:v1:artifact-content";
+/// BLAKE3 derive-key context for complete unsigned artifact envelopes.
+pub const ARTIFACT_ENVELOPE_CONTEXT: &str = "rebyte:v1:artifact-envelope";
 /// BLAKE3 derive-key context for public-key fingerprints.
 pub const KEY_ID_CONTEXT: &str = "rebyte:v1:key-id";
 /// Prefix of the Ed25519 message signed by RAP v1.
@@ -48,6 +52,18 @@ impl DomainHasher {
     #[must_use]
     pub fn capsule() -> Self {
         Self::new(CAPSULE_CONTEXT)
+    }
+
+    /// Creates an incremental unsigned-artifact content hasher.
+    #[must_use]
+    pub fn artifact_content() -> Self {
+        Self::new(ARTIFACT_CONTENT_CONTEXT)
+    }
+
+    /// Creates an incremental unsigned-artifact envelope hasher.
+    #[must_use]
+    pub fn artifact_envelope() -> Self {
+        Self::new(ARTIFACT_ENVELOPE_CONTEXT)
     }
 
     /// Adds bytes without allocating.
@@ -145,6 +161,11 @@ mod tests {
         assert_ne!(file_digest(bytes), manifest_digest(bytes));
         assert_ne!(manifest_digest(bytes), payload_digest(bytes));
         assert_ne!(payload_digest(bytes), capsule_digest(&[], &[], bytes));
+        let mut content = DomainHasher::artifact_content();
+        content.update(bytes);
+        let mut envelope = DomainHasher::artifact_envelope();
+        envelope.update(bytes);
+        assert_ne!(content.finalize(), envelope.finalize());
     }
 
     #[test]

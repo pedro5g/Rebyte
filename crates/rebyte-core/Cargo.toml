@@ -14,6 +14,7 @@ categories = ["filesystem", "encoding"]
 
 [dependencies]
 rebyte-apply = { path = "../rebyte-apply", version = "1.0.0" }
+rebyte-artifact-token = { path = "../rebyte-artifact-token", version = "1.0.0" }
 rebyte-diff = { path = "../rebyte-diff", version = "1.0.0" }
 rebyte-file-token = { path = "../rebyte-file-token", version = "1.0.0" }
 rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
