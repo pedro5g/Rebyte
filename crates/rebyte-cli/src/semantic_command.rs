@@ -388,15 +388,30 @@ fn create_backup(target: &Path, original: &[u8]) -> Result<PathBuf, CliError> {
         )
     })?;
     preserve_permissions(target, &backup)?;
-    std::fs::File::open(&backup)
+    synchronize_backup_metadata(&backup)?;
+    Ok(backup)
+}
+
+#[cfg(unix)]
+fn synchronize_backup_metadata(backup: &Path) -> Result<(), CliError> {
+    // `write_new` already syncs the bytes. This second sync persists the mode
+    // copied by `preserve_permissions` before the original file is replaced.
+    std::fs::File::open(backup)
         .and_then(|file| file.sync_all())
         .map_err(|error| {
             CliError::new(
                 EXIT_GENERIC,
                 format!("cannot synchronize semantic patch backup: {error}"),
             )
-        })?;
-    Ok(backup)
+        })
+}
+
+#[cfg(not(unix))]
+fn synchronize_backup_metadata(_backup: &Path) -> Result<(), CliError> {
+    // `File::open` creates a read-only Windows handle and `sync_all` maps to
+    // `FlushFileBuffers`, which rejects that handle. `write_new` has already
+    // flushed the writable file handle; there is no Unix mode change to sync.
+    Ok(())
 }
 
 fn replace_atomically(
