@@ -33,6 +33,10 @@ cargo xtask test
 
 Internal AI-assisted notes must stay below the ignored `.ai/` directory.
 
+The `rebyte-format` crate is `no_std + alloc` compatible and exposes only
+bounded protocol values. In particular, `RelativeArtifactPath` validates paths
+with platform-independent rules before any filesystem crate receives them.
+
 ## License
 
 Licensed under either Apache License, Version 2.0 or the MIT license, at your

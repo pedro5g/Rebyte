@@ -9,3 +9,4 @@ and releases follow Semantic Versioning.
 
 - Initial RAP v1 specification, threat model and security model.
 - Rust workspace quality and contribution policy.
+- Bounded, portable RAP v1 protocol types and path validation.
