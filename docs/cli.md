@@ -32,6 +32,7 @@ rebyte help verify
 
 ```text
 rebyte encode PATH|- [--compression auto|zstd|none]
+              [--profile fast|balanced|maximum]
   [--output PATH] [--json]
 ```
 

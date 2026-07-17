@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use rebyte_core::{
-    FileTokenCompression, FileTokenError, FileTokenOptions, decode_file_token, encode_file_token,
+    CompressionProfile, FileTokenCompression, FileTokenError, FileTokenOptions, decode_file_token,
+    encode_file_token,
 };
 use rebyte_format::{CompressionAlgorithm, SecurityLimits};
 use serde::Serialize;
@@ -22,6 +23,9 @@ pub(super) struct EncodeCommand {
     /// Compression strategy; `auto` keeps Zstandard only when smaller.
     #[arg(long, value_enum, default_value = "auto")]
     compression: CompressionArgument,
+    /// Zstandard speed-versus-size policy.
+    #[arg(long, value_enum, default_value = "balanced")]
+    profile: ProfileArgument,
     /// Write the token to a new file instead of standard output.
     #[arg(short, long, value_name = "PATH")]
     output: Option<PathBuf>,
@@ -53,6 +57,23 @@ enum CompressionArgument {
     None,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ProfileArgument {
+    Fast,
+    Balanced,
+    Maximum,
+}
+
+impl ProfileArgument {
+    const fn to_profile(self) -> CompressionProfile {
+        match self {
+            Self::Fast => CompressionProfile::Fast,
+            Self::Balanced => CompressionProfile::Balanced,
+            Self::Maximum => CompressionProfile::Maximum,
+        }
+    }
+}
+
 impl CompressionArgument {
     const fn to_policy(self) -> FileTokenCompression {
         match self {
@@ -76,7 +97,9 @@ pub(super) fn encode(command: &EncodeCommand) -> Result<(), CliError> {
             },
         )?
     };
-    let options = FileTokenOptions::default().with_compression(command.compression.to_policy());
+    let options = FileTokenOptions::default()
+        .with_compression(command.compression.to_policy())
+        .with_profile(command.profile.to_profile());
     let encoded = encode_file_token(&bytes, &options).map_err(encode_error)?;
     if let Some(output) = &command.output {
         let mut token_file = Vec::with_capacity(encoded.token().len().saturating_add(1));

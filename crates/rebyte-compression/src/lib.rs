@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Write as _;
 
 use rebyte_format::{CompressionAlgorithm, SecurityLimits};
 
@@ -10,6 +12,32 @@ use rebyte_format::{CompressionAlgorithm, SecurityLimits};
 pub const ZSTD_LEVEL_V1: i32 = 3;
 
 const BUFFER_SIZE: usize = 64 * 1_024;
+const ZSTD_LEVEL_FAST: i32 = 1;
+const ZSTD_LEVEL_MAXIMUM: i32 = 19;
+const MAXIMUM_WINDOW_LOG: u32 = 27;
+
+/// Reproducible speed-versus-size policy for native Zstandard encoding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CompressionProfile {
+    /// Prefer encoding speed and low working memory.
+    Fast,
+    /// Use the stable RAP v1 level and balanced resource usage.
+    #[default]
+    Balanced,
+    /// Spend substantially more CPU and enable bounded long-distance matching.
+    Maximum,
+}
+
+impl CompressionProfile {
+    const fn level(self) -> i32 {
+        match self {
+            Self::Fast => ZSTD_LEVEL_FAST,
+            Self::Balanced => ZSTD_LEVEL_V1,
+            Self::Maximum => ZSTD_LEVEL_MAXIMUM,
+        }
+    }
+}
 
 /// Compression or bounded decompression failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,11 +124,28 @@ pub fn compress(
     algorithm: CompressionAlgorithm,
     limits: &SecurityLimits,
 ) -> Result<Vec<u8>, CompressionError> {
+    compress_with_profile(input, algorithm, CompressionProfile::Balanced, limits)
+}
+
+/// Compresses bytes with an explicit deterministic resource profile.
+///
+/// The selected profile affects only encoder effort. Every resulting frame is
+/// decoded by the same bounded Zstandard path.
+///
+/// # Errors
+///
+/// Returns [`CompressionError`] under the same conditions as [`compress`].
+pub fn compress_with_profile(
+    input: &[u8],
+    algorithm: CompressionAlgorithm,
+    profile: CompressionProfile,
+    limits: &SecurityLimits,
+) -> Result<Vec<u8>, CompressionError> {
     let input_len = usize_to_u64(input.len())?;
     enforce_output_limit(input_len, limits)?;
     let output = match algorithm {
         CompressionAlgorithm::None => input.to_vec(),
-        CompressionAlgorithm::Zstd => compress_zstd(input)?,
+        CompressionAlgorithm::Zstd => compress_zstd(input, profile)?,
     };
     let output_len = usize_to_u64(output.len())?;
     enforce_compressed_limit(output_len, limits)?;
@@ -140,12 +185,36 @@ pub fn decompress(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn compress_zstd(input: &[u8]) -> Result<Vec<u8>, CompressionError> {
-    zstd::stream::encode_all(input, ZSTD_LEVEL_V1).map_err(|_| CompressionError::CompressionFailed)
+fn compress_zstd(input: &[u8], profile: CompressionProfile) -> Result<Vec<u8>, CompressionError> {
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), profile.level())
+        .map_err(|_| CompressionError::CompressionFailed)?;
+    encoder
+        .include_checksum(false)
+        .map_err(|_| CompressionError::CompressionFailed)?;
+    encoder
+        .include_contentsize(true)
+        .map_err(|_| CompressionError::CompressionFailed)?;
+    encoder
+        .set_pledged_src_size(Some(usize_to_u64(input.len())?))
+        .map_err(|_| CompressionError::CompressionFailed)?;
+    if profile == CompressionProfile::Maximum {
+        encoder
+            .long_distance_matching(true)
+            .map_err(|_| CompressionError::CompressionFailed)?;
+        encoder
+            .window_log(MAXIMUM_WINDOW_LOG)
+            .map_err(|_| CompressionError::CompressionFailed)?;
+    }
+    encoder
+        .write_all(input)
+        .map_err(|_| CompressionError::CompressionFailed)?;
+    encoder
+        .finish()
+        .map_err(|_| CompressionError::CompressionFailed)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn compress_zstd(_input: &[u8]) -> Result<Vec<u8>, CompressionError> {
+fn compress_zstd(_input: &[u8], _profile: CompressionProfile) -> Result<Vec<u8>, CompressionError> {
     Err(CompressionError::UnsupportedEncoder)
 }
 
@@ -255,7 +324,9 @@ fn usize_to_u64(value: usize) -> Result<u64, CompressionError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompressionError, compress, decompress};
+    use super::{
+        CompressionError, CompressionProfile, compress, compress_with_profile, decompress,
+    };
     use rebyte_format::{CompressionAlgorithm, SecurityLimits};
 
     #[test]
@@ -313,6 +384,40 @@ mod tests {
             )?,
             bytes
         );
+        Ok(())
+    }
+
+    #[test]
+    fn every_profile_is_deterministic_and_decodable() -> Result<(), CompressionError> {
+        let input = b"header:value\n".repeat(10_000);
+        for profile in [
+            CompressionProfile::Fast,
+            CompressionProfile::Balanced,
+            CompressionProfile::Maximum,
+        ] {
+            let first = compress_with_profile(
+                &input,
+                CompressionAlgorithm::Zstd,
+                profile,
+                &SecurityLimits::SIMPLE_ARTIFACT,
+            )?;
+            let second = compress_with_profile(
+                &input,
+                CompressionAlgorithm::Zstd,
+                profile,
+                &SecurityLimits::SIMPLE_ARTIFACT,
+            )?;
+            assert_eq!(first, second);
+            assert_eq!(
+                decompress(
+                    &first,
+                    CompressionAlgorithm::Zstd,
+                    u64::try_from(input.len()).map_err(|_| CompressionError::LengthOverflow)?,
+                    &SecurityLimits::SIMPLE_ARTIFACT,
+                )?,
+                input
+            );
+        }
         Ok(())
     }
 

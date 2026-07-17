@@ -9,8 +9,9 @@ pub use rebyte_apply::{
 };
 pub use rebyte_diff::{ChangeKind, DiffEntry, DiffError, DiffReport, DiffSummary, diff_capsule};
 pub use rebyte_file_token::{
-    DecodedFileToken, EncodedFileToken, FILE_TOKEN_HEADER_SIZE, FILE_TOKEN_PREFIX,
-    FileTokenCompression, FileTokenError, FileTokenOptions, decode_file_token, encode_file_token,
+    CompressionProfile, DecodedFileToken, EncodedFileToken, FILE_TOKEN_HEADER_SIZE,
+    FILE_TOKEN_PREFIX, FileTokenCompression, FileTokenError, FileTokenOptions, decode_file_token,
+    encode_file_token,
 };
 pub use rebyte_format::{PROTOCOL_VERSION, SecurityLimits};
 pub use rebyte_pack::{ArtifactFile, PackError, PackOptions, UnsignedCapsule, pack};

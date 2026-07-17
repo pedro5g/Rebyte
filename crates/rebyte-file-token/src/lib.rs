@@ -14,7 +14,8 @@ use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rebyte_compression::{CompressionError, compress, decompress};
+pub use rebyte_compression::CompressionProfile;
+use rebyte_compression::{CompressionError, compress_with_profile, decompress};
 use rebyte_format::{CompressionAlgorithm, Digest32, SecurityLimits};
 use rebyte_integrity::{digest_matches, file_digest};
 
@@ -47,6 +48,8 @@ pub enum FileTokenCompression {
 pub struct FileTokenOptions {
     /// Compression selection policy.
     pub compression: FileTokenCompression,
+    /// Native Zstandard speed-versus-size profile.
+    pub profile: CompressionProfile,
     /// Resource limits enforced during both encoding and self-verification.
     pub limits: SecurityLimits,
 }
@@ -56,6 +59,13 @@ impl FileTokenOptions {
     #[must_use]
     pub const fn with_compression(mut self, compression: FileTokenCompression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Returns these options with a selected native compression profile.
+    #[must_use]
+    pub const fn with_profile(mut self, profile: CompressionProfile) -> Self {
+        self.profile = profile;
         self
     }
 
@@ -71,6 +81,7 @@ impl Default for FileTokenOptions {
     fn default() -> Self {
         Self {
             compression: FileTokenCompression::Auto,
+            profile: CompressionProfile::Balanced,
             limits: SecurityLimits::SIMPLE_ARTIFACT,
         }
     }
@@ -444,20 +455,40 @@ fn select_payload(
     match options.compression {
         FileTokenCompression::None => Ok((
             CompressionAlgorithm::None,
-            compress(bytes, CompressionAlgorithm::None, &options.limits)?,
+            compress_with_profile(
+                bytes,
+                CompressionAlgorithm::None,
+                options.profile,
+                &options.limits,
+            )?,
         )),
         FileTokenCompression::Zstd => Ok((
             CompressionAlgorithm::Zstd,
-            compress(bytes, CompressionAlgorithm::Zstd, &options.limits)?,
+            compress_with_profile(
+                bytes,
+                CompressionAlgorithm::Zstd,
+                options.profile,
+                &options.limits,
+            )?,
         )),
         FileTokenCompression::Auto => {
-            match compress(bytes, CompressionAlgorithm::Zstd, &options.limits) {
+            match compress_with_profile(
+                bytes,
+                CompressionAlgorithm::Zstd,
+                options.profile,
+                &options.limits,
+            ) {
                 Ok(compressed) if compressed.len() < bytes.len() => {
                     Ok((CompressionAlgorithm::Zstd, compressed))
                 }
                 Ok(_) | Err(CompressionError::UnsupportedEncoder) => Ok((
                     CompressionAlgorithm::None,
-                    compress(bytes, CompressionAlgorithm::None, &options.limits)?,
+                    compress_with_profile(
+                        bytes,
+                        CompressionAlgorithm::None,
+                        options.profile,
+                        &options.limits,
+                    )?,
                 )),
                 Err(error) => Err(error.into()),
             }
@@ -500,8 +531,8 @@ mod tests {
     use rebyte_format::{CompressionAlgorithm, SecurityLimits};
 
     use super::{
-        FILE_TOKEN_HEADER_SIZE, FILE_TOKEN_PREFIX, FileTokenCompression, FileTokenError,
-        FileTokenOptions, decode_file_token, encode_file_token,
+        CompressionProfile, FILE_TOKEN_HEADER_SIZE, FILE_TOKEN_PREFIX, FileTokenCompression,
+        FileTokenError, FileTokenOptions, decode_file_token, encode_file_token,
     };
 
     #[test]
@@ -582,6 +613,24 @@ mod tests {
             let encoded = encode_file_token(bytes, &options)?;
             assert_eq!(
                 decode_file_token(encoded.token(), &SecurityLimits::V1)?.bytes(),
+                bytes
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_profiles_round_trip() -> Result<(), FileTokenError> {
+        let bytes = b"repeatable profile input\n".repeat(10_000);
+        for profile in [
+            CompressionProfile::Fast,
+            CompressionProfile::Balanced,
+            CompressionProfile::Maximum,
+        ] {
+            let options = FileTokenOptions::default().with_profile(profile);
+            let encoded = encode_file_token(&bytes, &options)?;
+            assert_eq!(
+                decode_file_token(encoded.token(), &SecurityLimits::SIMPLE_ARTIFACT)?.bytes(),
                 bytes
             );
         }
