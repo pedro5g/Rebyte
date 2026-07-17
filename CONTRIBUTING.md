@@ -7,11 +7,17 @@ Every change must keep these commands green:
 ```console
 cargo xtask check
 cargo xtask test
+cargo check -p rebyte-wasm --target wasm32-unknown-unknown
 ```
 
 Security-sensitive changes additionally require the relevant protocol vectors,
 property tests, adversarial tests or fuzz targets. Public behavior must be
 documented in the README and rustdoc in the same commit.
+
+Release-affecting changes must also keep `dist generate --check` and
+`dist plan` green. The generated workflow has one documented cargo-dist 0.32.0
+CycloneDX expression correction; preserve it until the generator fixes the
+upstream output.
 
 ## Commit messages
 

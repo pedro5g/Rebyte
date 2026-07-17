@@ -1,6 +1,7 @@
 //! Stable facade for Rebyte producers and consumers.
 
 #![forbid(unsafe_code)]
+#![doc = include_str!("../../../README.md")]
 
 pub use rebyte_apply::{
     ApplyError, ApplyOptions, ApplyReport, TransactionState, TransactionSummary, apply_transaction,

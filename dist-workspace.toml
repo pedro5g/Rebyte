@@ -1,0 +1,26 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+packages = ["rebyte-cli"]
+pr-run-mode = "plan"
+allow-dirty = ["ci"] # release.yml fixes cargo-dist 0.32.0 CycloneDX output typo
+installers = ["shell", "powershell"]
+checksum = "sha256"
+windows-archive = ".zip"
+unix-archive = ".tar.xz"
+cargo-auditable = true
+cargo-cyclonedx = true
+github-attestations = true
+source-tarball = true
+precise-builds = true
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]

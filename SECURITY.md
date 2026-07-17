@@ -17,3 +17,10 @@ after a fix is available.
 
 The project does not claim to be bug-free or suitable as a security boundary
 without independent review.
+
+## Release verification
+
+Official release archives are expected to have SHA-256 checksum companions, a
+CycloneDX SBOM and a GitHub artifact attestation. Verify all three before
+deployment. Absence or failure of any release evidence is a distribution
+incident and should be reported privately.

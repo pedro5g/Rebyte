@@ -26,3 +26,37 @@ jobs:
         run: cargo xtask test
       - name: Check WebAssembly primitives
         run: cargo check -p rebyte-wasm --target wasm32-unknown-unknown
+
+  portability:
+    name: Tests (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-24.04-arm
+          - macos-15-intel
+          - macos-15
+          - windows-2025
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+  ecosystem:
+    name: Nextest and dependency policy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install validation tools
+        run: cargo install --locked cargo-nextest cargo-audit cargo-deny
+      - name: Nextest
+        run: cargo nextest run --workspace --all-features
+      - name: Dependency audit and policy
+        run: cargo xtask security

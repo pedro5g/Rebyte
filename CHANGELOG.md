@@ -22,3 +22,4 @@ and releases follow Semantic Versioning.
 - Property tests, fuzz corpus and scheduled Miri, mutation and supply-chain checks.
 - Browser-safe unsigned packing and structural inspection WebAssembly exports.
 - Restricted deterministic and environment-backed development signing adapters.
+- Cross-platform dist releases with checksums, SBOMs, attestations and complete usage documentation.
