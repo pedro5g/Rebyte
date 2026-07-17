@@ -46,6 +46,23 @@ impl SecurityLimits {
         max_compression_ratio: u64::MAX,
         ..Self::V1
     };
+
+    /// Opt-in limits for streaming local artifacts up to 256 `GiB`.
+    ///
+    /// Inline text remains bounded to 48 `MiB`. These larger binary limits are
+    /// safe only with streaming readers, bounded temporary storage and an
+    /// explicit caller decision to use the large profile.
+    pub const LARGE_ARTIFACT: Self = Self {
+        max_token_bytes: Self::V1.max_token_bytes,
+        max_capsule_bytes: 257 * 1_024 * 1_024 * 1_024,
+        max_manifest_bytes: 64 * 1_024 * 1_024,
+        max_compressed_payload_bytes: 256 * 1_024 * 1_024 * 1_024,
+        max_uncompressed_payload_bytes: 256 * 1_024 * 1_024 * 1_024,
+        max_single_file_bytes: 256 * 1_024 * 1_024 * 1_024,
+        max_file_count: 100_000,
+        max_path_bytes: Self::V1.max_path_bytes,
+        max_compression_ratio: u64::MAX,
+    };
 }
 
 impl Default for SecurityLimits {
@@ -75,5 +92,16 @@ mod tests {
             SecurityLimits::V1.max_uncompressed_payload_bytes
         );
         assert_eq!(limits.max_compression_ratio, u64::MAX);
+    }
+
+    #[test]
+    fn large_artifacts_keep_inline_text_conservative() {
+        let limits = SecurityLimits::LARGE_ARTIFACT;
+        assert_eq!(
+            limits.max_token_bytes,
+            SecurityLimits::SIMPLE_ARTIFACT.max_token_bytes
+        );
+        assert!(limits.max_single_file_bytes >= 50 * 1_024 * 1_024 * 1_024);
+        assert!(limits.max_file_count > SecurityLimits::V1.max_file_count);
     }
 }
