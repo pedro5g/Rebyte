@@ -12,5 +12,8 @@ readme = "../../README.md"
 keywords = ["artifact", "protocol", "security"]
 categories = ["encoding", "no-std"]
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

@@ -19,3 +19,4 @@ and releases follow Semantic Versioning.
 - Read-only `inspect`, `verify`, `diff`, `doctor` and completion CLI commands.
 - Capability-confined, journaled and recoverable filesystem transactions.
 - Confirmed/dry-run capsule application and transaction recovery CLI commands.
+- Property tests, fuzz corpus and scheduled Miri, mutation and supply-chain checks.

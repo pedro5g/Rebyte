@@ -1,0 +1,42 @@
+[package]
+name = "rebyte-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rebyte-codec = { path = "../crates/rebyte-codec" }
+rebyte-compression = { path = "../crates/rebyte-compression" }
+rebyte-format = { path = "../crates/rebyte-format" }
+
+[[bin]]
+name = "decode_capsule"
+path = "fuzz_targets/decode_capsule.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_token"
+path = "fuzz_targets/decode_token.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "portable_path"
+path = "fuzz_targets/portable_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decompress"
+path = "fuzz_targets/decompress.rs"
+test = false
+doc = false
+bench = false

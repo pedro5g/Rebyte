@@ -1,0 +1,67 @@
+name: Scheduled security validation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  supply-chain:
+    name: Advisory and policy audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install audit tools
+        run: cargo install --locked cargo-audit cargo-deny
+      - name: Audit dependencies
+        run: cargo xtask security
+
+  miri:
+    name: Miri protocol primitives
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install nightly Miri
+        run: rustup toolchain install nightly --profile minimal --component miri
+      - name: Run Miri
+        run: cargo +nightly miri test -p rebyte-format -p rebyte-codec -p rebyte-integrity
+
+  fuzz:
+    name: Bounded parser fuzzing
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [decode_capsule, decode_token, portable_path, decompress]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install nightly Rust
+        run: rustup toolchain install nightly --profile minimal
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+      - name: Fuzz target
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300
+
+  mutations:
+    name: Mutation sampling
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+      - name: Test security-critical crates
+        run: cargo mutants --in-place -p rebyte-format -p rebyte-codec -p rebyte-integrity -p rebyte-verify --timeout 120

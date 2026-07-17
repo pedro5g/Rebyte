@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["fuzz"]
 members = [
     "crates/rebyte-format",
     "crates/rebyte-codec",
@@ -31,6 +32,7 @@ serde_json = "1.0"
 similar = "2.7"
 tempfile = "3.27"
 uuid = { version = "1.18", features = ["v4"] }
+proptest = "1.9"
 
 [workspace.package]
 version = "0.1.0"

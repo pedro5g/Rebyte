@@ -7,9 +7,10 @@ yanked = "deny"
 
 [licenses]
 version = 2
-confidence-threshold = 0.8
+confidence-threshold = 0.93
 allow = [
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
@@ -21,6 +22,7 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+highlight = "all"
 
 [sources]
 unknown-registry = "deny"

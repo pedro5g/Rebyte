@@ -927,7 +927,7 @@ mod tests {
     use rebyte_signature::{
         KeyStatus, Signer, TrustChannel, TrustedKeyring, TrustedPublicKey, VerificationPolicy,
     };
-    use rebyte_verify::{CapsuleInput, sign_capsule, verify_capsule};
+    use rebyte_verify::{CapsuleInput, FullyVerifiedCapsule, sign_capsule, verify_capsule};
     use tempfile::tempdir;
 
     use super::{
@@ -946,6 +946,33 @@ mod tests {
         fn sign(&self, message: &[u8]) -> Result<[u8; 64], Self::Error> {
             Ok(ed25519_dalek::Signer::sign(&self.0, message).to_bytes())
         }
+    }
+
+    fn verified_fixture() -> Result<FullyVerifiedCapsule, Box<dyn std::error::Error>> {
+        let signing_key = TestSigner(SigningKey::from_bytes(&[0x33; 32]));
+        let trusted = TrustedPublicKey::new(
+            "recovery-test-only",
+            signing_key.public_key(),
+            TrustChannel::Development,
+            KeyStatus::Active,
+        )?;
+        let keyring = TrustedKeyring::new(vec![trusted])?;
+        let mut options = PackOptions::new("recovery-tests")?;
+        options.compression = CompressionAlgorithm::None;
+        let unsigned = pack(
+            &[
+                ArtifactFile::new("existing.txt", b"after\n".to_vec())?,
+                ArtifactFile::new("nested/created.bin", vec![3, 2, 1])?,
+            ],
+            &options,
+        )?;
+        let capsule = sign_capsule(&unsigned, &signing_key)?;
+        let policy = VerificationPolicy {
+            allow_staging: false,
+            allow_development: true,
+        };
+        verify_capsule(CapsuleInput::Binary(capsule.as_bytes()), &policy, &keyring)
+            .map_err(Into::into)
     }
 
     #[test]
@@ -1035,6 +1062,58 @@ mod tests {
         );
         assert!(!directory.path().join("nested/created.bin").exists());
         assert!(list_transactions(directory.path())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn resumes_from_the_staged_journal_boundary() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("existing.txt"), b"before\n")?;
+        let verified = verified_fixture()?;
+        let root = super::open_root(directory.path())?;
+        let (_transactions, transaction_id, transaction) = super::create_transaction(&root)?;
+        let mut journal = super::prepare(&verified, &root, &transaction_id, true)?;
+        super::persist_journal(&transaction, &journal)?;
+        super::stage(verified.files(), &root, &transaction, &mut journal)?;
+        super::persist_journal(&transaction, &journal)?;
+        drop(transaction);
+        drop(root);
+
+        super::resume_transaction(directory.path(), &transaction_id)?;
+        assert_eq!(fs::read(directory.path().join("existing.txt"))?, b"after\n");
+        assert_eq!(
+            fs::read(directory.path().join("nested/created.bin"))?,
+            [3, 2, 1]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn detects_mutation_after_staging_before_any_rename() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("existing.txt"), b"before\n")?;
+        let verified = verified_fixture()?;
+        let root = super::open_root(directory.path())?;
+        let (_transactions, transaction_id, transaction) = super::create_transaction(&root)?;
+        let mut journal = super::prepare(&verified, &root, &transaction_id, true)?;
+        super::persist_journal(&transaction, &journal)?;
+        super::stage(verified.files(), &root, &transaction, &mut journal)?;
+        super::persist_journal(&transaction, &journal)?;
+        fs::write(
+            directory.path().join("existing.txt"),
+            b"concurrent change\n",
+        )?;
+
+        assert!(matches!(
+            super::commit(&root, &transaction, &mut journal),
+            Err(ApplyError::Conflict)
+        ));
+        assert_eq!(
+            fs::read(directory.path().join("existing.txt"))?,
+            b"concurrent change\n"
+        );
+        assert!(!directory.path().join("nested/created.bin").exists());
         Ok(())
     }
 

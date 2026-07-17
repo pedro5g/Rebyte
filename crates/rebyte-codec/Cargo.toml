@@ -14,5 +14,8 @@ publish = false
 base64.workspace = true
 rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

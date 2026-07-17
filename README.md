@@ -31,6 +31,12 @@ cargo xtask check
 cargo xtask test
 ```
 
+Adversarial inputs are exercised by always-on property tests and the targets in
+`fuzz/`. Scheduled CI runs Miri over protocol primitives, bounded libFuzzer
+jobs, dependency policy/audit checks and mutation sampling. Reproduce one fuzz
+target with `cargo +nightly fuzz run decode_capsule` after installing
+`cargo-fuzz`.
+
 Internal AI-assisted notes must stay below the ignored `.ai/` directory.
 
 The `rebyte-format` crate is `no_std + alloc` compatible and exposes only
