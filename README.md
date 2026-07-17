@@ -11,7 +11,7 @@ authenticated mode packages a directory into a deterministic RAP v1 capsule,
 signs it with Ed25519 and reconstructs files only after bounded parsing,
 trust-policy verification, decompression and byte-level integrity checks.
 
-Rebyte 1.1 provides a stable CLI and Rust API. It performs no network access,
+Rebyte 1.2 provides a stable CLI and Rust API. It performs no network access,
 command execution, lifecycle hooks or generated-code interpretation.
 
 ## Why Rebyte
@@ -410,18 +410,18 @@ must ignore unknown fields and check `schemaVersion` before interpretation.
 `rebyte-core` is the stable consumer and producer facade. Only a
 `FullyVerifiedCapsule` can reach diff or filesystem application APIs.
 
-Unsigned single-file tokens are available through a small byte-slice API:
+Unsigned file and folder artifacts are available through a canonical API:
 
 ```rust
 use rebyte_core::{
-    FileTokenOptions, SecurityLimits, decode_file_token, encode_file_token,
+    Artifact, ArtifactOptions, SecurityLimits, decode_artifact, encode_artifact,
 };
 
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
-let original = b"byte-exact content\n";
-let encoded = encode_file_token(original, &FileTokenOptions::default())?;
-let decoded = decode_file_token(encoded.token(), &SecurityLimits::V1)?;
-assert_eq!(decoded.bytes(), original);
+let original = Artifact::file(b"byte-exact content\n".to_vec(), false);
+let encoded = encode_artifact(&original, &ArtifactOptions::default())?;
+let decoded = decode_artifact(encoded.binary(), &SecurityLimits::SIMPLE_ARTIFACT)?;
+assert_eq!(decoded.artifact(), &original);
 # Ok(())
 # }
 ```
@@ -429,6 +429,22 @@ assert_eq!(decoded.bytes(), original);
 The decoded API labels this data by type but deliberately provides no
 publisher identity. Its digest is integrity metadata, not an authenticity
 decision.
+
+Semantic patches expose the same strict validation used by the CLI:
+
+```rust
+use rebyte_core::{apply_semantic_patch, parse_patch};
+
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+let patch = parse_patch(
+    br#"{"schemaVersion":1,"format":"json","targetDigest":null,
+         "operations":[{"op":"set","path":"/port","value":8080}]}"#,
+)?;
+let result = apply_semantic_patch(&patch, br#"{"port":80}"#)?;
+assert!(result.changed());
+# Ok(())
+# }
+```
 
 ```rust,no_run
 use std::path::Path;
@@ -502,7 +518,7 @@ benchmarks. Current measured targets and baselines are documented in
 
 ## Security
 
-No software is “100% secure”. Rebyte 1.1 provides a stable, fail-closed design
+No software is “100% secure”. Rebyte 1.2 provides a stable, fail-closed design
 and adversarial tests, but has not claimed an independent security audit.
 Report suspected vulnerabilities privately according to
 [SECURITY.md](SECURITY.md); never attach production keys or secret material to

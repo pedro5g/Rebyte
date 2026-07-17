@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-apply"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-artifact-token"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64",
  "proptest",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-cli"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64",
  "cap-fs-ext",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-codec"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64",
  "criterion",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-compression"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "rebyte-format",
  "ruzstd",
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "rebyte-apply",
  "rebyte-artifact-token",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-diff"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "cap-std",
  "rebyte-format",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-file-token"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64",
  "proptest",
@@ -1110,14 +1110,14 @@ dependencies = [
 
 [[package]]
 name = "rebyte-format"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "rebyte-integrity"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "blake3",
  "rebyte-format",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-pack"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "rebyte-codec",
  "rebyte-compression",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-semantic"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "proptest",
  "rebyte-format",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-signature"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ed25519-dalek",
  "rebyte-format",
@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-signer"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "argon2",
  "base64",
@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-verify"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ed25519-dalek",
  "rebyte-codec",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "rebyte-wasm"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "rebyte-codec",
  "rebyte-format",
@@ -1834,7 +1834,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "xtask"
-version = "1.1.0"
+version = "1.2.0"
 
 [[package]]
 name = "zerocopy"

@@ -111,7 +111,7 @@ run can inspect, roll back or resume the persisted transaction.
 Applications may lower these values. Raising them is a local policy decision;
 the capsule or artifact cannot change them. The unsigned streaming
 `LARGE_ARTIFACT` policy is an explicit CLI choice for `.rba` files and remains
-bounded to 256 GiB reconstructed bytes, 64 GiB stored bytes, 64 MiB manifest
+bounded to 256 GiB reconstructed bytes, 256 GiB stored bytes, 64 MiB manifest
 and 100,000 entries. Inline tokens never receive this larger policy.
 
 ## Unsafe and dependencies

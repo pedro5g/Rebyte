@@ -5,6 +5,8 @@ and releases follow Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-17
+
 ### Added
 
 - Canonical `ra1_`/`.rba` unsigned artifacts for exact files and portable

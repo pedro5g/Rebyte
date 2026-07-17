@@ -110,7 +110,7 @@ the same envelope digest during the writing pass.
 
 The standard profile uses `SecurityLimits::SIMPLE_ARTIFACT`. The opt-in
 `SecurityLimits::LARGE_ARTIFACT` profile permits a 256 GiB aggregate and
-single file, a 64 GiB stored payload, a 64 MiB manifest and 100,000 entries.
+single file, a 256 GiB stored payload, a 64 MiB manifest and 100,000 entries.
 It is intended only for streaming binary files, not inline Base64URL tokens.
 These are implementation safety ceilings, not format capabilities or a claim
 that every host has sufficient storage.
