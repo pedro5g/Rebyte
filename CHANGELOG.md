@@ -5,6 +5,18 @@ and releases follow Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Avoid reopening a completed semantic-patch backup through a read-only Windows
+  handle before `FlushFileBuffers`; backup bytes remain synchronized by their
+  writable creation handle.
+
+### Documentation
+
+- Define the Rebyte Chain design draft for self-custodied signing and encryption
+  identities, HPKE recipient envelopes, session-bound threshold approvals,
+  signed Merkle event history and local-first browser boundaries.
+
 ## [1.2.0] - 2026-07-17
 
 ### Added

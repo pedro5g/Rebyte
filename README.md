@@ -14,6 +14,14 @@ trust-policy verification, decompression and byte-level integrity checks.
 Rebyte 1.2 provides a stable CLI and Rust API. It performs no network access,
 command execution, lifecycle hooks or generated-code interpretation.
 
+The next protocol family is being designed as **Rebyte Chain**: encrypted
+multi-recipient artifacts, self-custodied identities, threshold approvals and
+a local-first signed event graph. It is deliberately not a cryptocurrency or
+global-consensus blockchain. The current architecture, security boundaries and
+implementation gates are documented in the
+[Rebyte Chain design draft](docs/chain-architecture.md). No Chain format or
+command is stable or implemented in Rebyte 1.2.
+
 ## Why Rebyte
 
 - exact byte-for-byte reconstruction with domain-separated BLAKE3 digests;
