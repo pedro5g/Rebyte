@@ -37,6 +37,11 @@ jobs, dependency policy/audit checks and mutation sampling. Reproduce one fuzz
 target with `cargo +nightly fuzz run decode_capsule` after installing
 `cargo-fuzz`.
 
+`rebyte-wasm` exports only `pack_unsigned`, `inspect` and `verify_structure`.
+Browser packing is deterministic and uncompressed; a trusted server must
+revalidate, choose production compression and sign it. The Wasm module contains
+no private key, trust decision, network access or filesystem API.
+
 Internal AI-assisted notes must stay below the ignored `.ai/` directory.
 
 The `rebyte-format` crate is `no_std + alloc` compatible and exposes only

@@ -20,3 +20,4 @@ and releases follow Semantic Versioning.
 - Capability-confined, journaled and recoverable filesystem transactions.
 - Confirmed/dry-run capsule application and transaction recovery CLI commands.
 - Property tests, fuzz corpus and scheduled Miri, mutation and supply-chain checks.
+- Browser-safe unsigned packing and structural inspection WebAssembly exports.

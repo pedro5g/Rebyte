@@ -25,4 +25,4 @@ jobs:
       - name: Test
         run: cargo xtask test
       - name: Check WebAssembly primitives
-        run: cargo check -p rebyte-compression --target wasm32-unknown-unknown
+        run: cargo check -p rebyte-wasm --target wasm32-unknown-unknown

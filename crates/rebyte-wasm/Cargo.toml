@@ -1,0 +1,25 @@
+[package]
+name = "rebyte-wasm"
+description = "Browser-safe structural and unsigned packing APIs for Rebyte"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rebyte-codec = { path = "../rebyte-codec", version = "0.1.0" }
+rebyte-format = { path = "../rebyte-format", version = "0.1.0" }
+rebyte-pack = { path = "../rebyte-pack", version = "0.1.0" }
+serde.workspace = true
+serde-wasm-bindgen.workspace = true
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true
