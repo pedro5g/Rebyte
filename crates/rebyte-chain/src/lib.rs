@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+mod backup;
 mod codec;
 mod envelope;
 mod error;
@@ -20,6 +21,8 @@ mod release;
 mod secret_sharing;
 #[cfg(test)]
 mod vector_tests;
+
+pub use backup::{IdentityBackupShare, backup_identity, restore_identity};
 
 pub use envelope::{
     CAPSULE_TOKEN_PREFIX, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainLimits,

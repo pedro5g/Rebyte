@@ -346,6 +346,14 @@ impl UnlockedIdentity {
     pub(crate) fn hpke_private_key(&self) -> HpkePrivateKey {
         ChainKem::derive_keypair(self.encryption_ikm.as_ref()).0
     }
+
+    pub(crate) fn signing_seed(&self) -> Zeroizing<[u8; SEED_BYTES]> {
+        Zeroizing::new(self.signing_key.to_bytes())
+    }
+
+    pub(crate) const fn encryption_ikm(&self) -> &Zeroizing<[u8; SEED_BYTES]> {
+        &self.encryption_ikm
+    }
 }
 
 impl fmt::Debug for UnlockedIdentity {
@@ -430,25 +438,66 @@ fn create_identity_documents(
         proof_signature: encode_base64(&proof_signature),
     };
     public.validate()?;
+    let private = encrypt_identity_with_material(
+        public.clone(),
+        &material.signing_seed,
+        &material.encryption_ikm,
+        passphrase,
+        material.salt,
+        material.nonce,
+    )?;
+    Ok((private, public))
+}
 
+// Callers must supply seeds corresponding to `public`; the document is only
+// unlockable when they match.
+pub(crate) fn reencrypt_identity(
+    public: IdentityPublicDocument,
+    signing_seed: &Zeroizing<[u8; SEED_BYTES]>,
+    encryption_ikm: &Zeroizing<[u8; SEED_BYTES]>,
+    passphrase: &[u8],
+) -> Result<EncryptedIdentityDocument, ChainError> {
+    let mut salt = [0_u8; SALT_BYTES];
+    let mut nonce = [0_u8; NONCE_BYTES];
+    getrandom::fill(&mut salt).map_err(|_| ChainError::EntropyUnavailable)?;
+    getrandom::fill(&mut nonce).map_err(|_| ChainError::EntropyUnavailable)?;
+    encrypt_identity_with_material(
+        public,
+        signing_seed,
+        encryption_ikm,
+        passphrase,
+        salt,
+        nonce,
+    )
+}
+
+fn encrypt_identity_with_material(
+    public: IdentityPublicDocument,
+    signing_seed: &Zeroizing<[u8; SEED_BYTES]>,
+    encryption_ikm: &Zeroizing<[u8; SEED_BYTES]>,
+    passphrase: &[u8],
+    salt: [u8; SALT_BYTES],
+    nonce: [u8; NONCE_BYTES],
+) -> Result<EncryptedIdentityDocument, ChainError> {
+    validate_passphrase(passphrase)?;
     let mut secrets = Zeroizing::new([0_u8; SECRET_PLAINTEXT_BYTES]);
     secrets
         .get_mut(..SEED_BYTES)
         .ok_or(ChainError::LengthOverflow)?
-        .copy_from_slice(material.signing_seed.as_ref());
+        .copy_from_slice(signing_seed.as_ref());
     secrets
         .get_mut(SEED_BYTES..)
         .ok_or(ChainError::LengthOverflow)?
-        .copy_from_slice(material.encryption_ikm.as_ref());
-    let key = derive_encryption_key(passphrase, &material.salt)?;
+        .copy_from_slice(encryption_ikm.as_ref());
+    let key = derive_encryption_key(passphrase, &salt)?;
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
         .map_err(|_| ChainError::CryptographicFailure)?;
     let encrypted = cipher
         .encrypt(
-            &XNonce::from(material.nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: secrets.as_ref(),
-                aad: &private_aad(&public, &material.salt, &material.nonce)?,
+                aad: &private_aad(&public, &salt, &nonce)?,
             },
         )
         .map_err(|_| ChainError::EncryptionFailed)?;
@@ -459,16 +508,16 @@ fn create_identity_documents(
         kdf_memory_kib: KDF_MEMORY_KIB,
         kdf_iterations: KDF_ITERATIONS,
         kdf_lanes: KDF_LANES,
-        public_identity: public.clone(),
-        salt: encode_base64(&material.salt),
-        nonce: encode_base64(&material.nonce),
+        public_identity: public,
+        salt: encode_base64(&salt),
+        nonce: encode_base64(&nonce),
         encrypted_secrets: encode_base64(&encrypted),
     };
     private.validate()?;
-    Ok((private, public))
+    Ok(private)
 }
 
-fn unlocked_from_seeds(
+pub(crate) fn unlocked_from_seeds(
     signing_seed: &[u8; SEED_BYTES],
     encryption_ikm: Zeroizing<[u8; SEED_BYTES]>,
     public_identity: IdentityPublicDocument,

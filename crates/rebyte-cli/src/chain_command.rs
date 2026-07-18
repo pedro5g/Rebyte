@@ -13,12 +13,12 @@ use clap::{Args, Subcommand};
 use rebyte_chain::{
     Capability, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError, ChainLimits,
     ContentKind as ContractContentKind, EncryptedIdentityDocument, GroupAcceptance,
-    GroupCertificate, GroupProposal, IdentityPublicDocument, OpenedContent, QuorumProposalOptions,
-    ReleaseGrant, ReleasePolicy, ReleaseRequest, TrustedClock, UnlockedIdentity, accept_group,
-    approve_capsule, create_capsule_proposal, create_quorum_capsule_proposal,
-    create_quorum_semantic_patch_proposal, create_release_request, create_semantic_patch_proposal,
-    finalize_capsule, finalize_group, generate_identity, grant_release, open_capsule,
-    open_quorum_content, open_semantic_patch,
+    GroupCertificate, GroupProposal, IdentityBackupShare, IdentityPublicDocument, OpenedContent,
+    QuorumProposalOptions, ReleaseGrant, ReleasePolicy, ReleaseRequest, TrustedClock,
+    UnlockedIdentity, accept_group, approve_capsule, backup_identity, create_capsule_proposal,
+    create_quorum_capsule_proposal, create_quorum_semantic_patch_proposal, create_release_request,
+    create_semantic_patch_proposal, finalize_capsule, finalize_group, generate_identity,
+    grant_release, open_capsule, open_quorum_content, open_semantic_patch, restore_identity,
 };
 use rebyte_core::{
     ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
@@ -70,6 +70,10 @@ enum IdentitySubcommand {
     Generate(IdentityGenerateCommand),
     /// Validate a distributable public identity package.
     Inspect(IdentityInspectCommand),
+    /// Split an identity into signed threshold recovery shares.
+    Backup(IdentityBackupCommand),
+    /// Reconstruct an identity from threshold recovery shares.
+    Restore(IdentityRestoreCommand),
 }
 
 #[derive(Debug, Args)]
@@ -98,6 +102,42 @@ struct IdentityGenerateCommand {
 struct IdentityInspectCommand {
     /// Public identity document.
     public_key: PathBuf,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct IdentityBackupCommand {
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// Total number of share documents to create.
+    #[arg(long, value_name = "COUNT")]
+    share_count: u8,
+    /// Distinct shares required to reconstruct the identity.
+    #[arg(long, value_name = "COUNT")]
+    threshold: u8,
+    /// Directory receiving mode-0600 identity-share-N.json documents.
+    #[arg(long, value_name = "PATH")]
+    output_dir: PathBuf,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct IdentityRestoreCommand {
+    /// Signed backup share; pass exactly the recovery threshold of files.
+    #[arg(long = "share", value_name = "PATH", required = true)]
+    shares: Vec<PathBuf>,
+    /// Passphrase-protected private `.rbk` output.
+    #[arg(long, value_name = "PATH")]
+    private_key: PathBuf,
+    /// Distributable public identity output.
+    #[arg(long, value_name = "PATH")]
+    public_key: PathBuf,
+    #[command(flatten)]
+    passphrase: PassphraseArgs,
     /// Emit stable JSON.
     #[arg(long)]
     json: bool,
@@ -506,6 +546,8 @@ fn run_identity(command: &IdentityCommand) -> Result<(), CliError> {
     match &command.command {
         IdentitySubcommand::Generate(command) => generate_identity_command(command),
         IdentitySubcommand::Inspect(command) => inspect_identity(command),
+        IdentitySubcommand::Backup(command) => backup_identity_command(command),
+        IdentitySubcommand::Restore(command) => restore_identity_command(command),
     }
 }
 
@@ -613,6 +655,144 @@ fn inspect_identity(command: &IdentityInspectCommand) -> Result<(), CliError> {
         println!("  Proof        valid");
         Ok(())
     }
+}
+
+fn backup_identity_command(command: &IdentityBackupCommand) -> Result<(), CliError> {
+    let identity = unlock_identity(&command.identity)?;
+    let shares =
+        backup_identity(&identity, command.share_count, command.threshold).map_err(chain_error)?;
+    fs::create_dir_all(&command.output_dir).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!(
+                "cannot create backup directory {}: {error}",
+                command.output_dir.display()
+            ),
+        )
+    })?;
+    let mut outputs = Vec::with_capacity(shares.len());
+    for share in &shares {
+        let path = command.output_dir.join(format!(
+            "identity-share-{}.json",
+            share.share_index().map_err(chain_error)?
+        ));
+        ensure_output_absent(&path)?;
+        outputs.push(path);
+    }
+    let mut written: Vec<PathBuf> = Vec::with_capacity(shares.len());
+    for (share, path) in shares.iter().zip(&outputs) {
+        let bytes = share.to_json().map_err(chain_error)?;
+        if let Err(error) = write_new(path, &bytes, true) {
+            for created in &written {
+                let _cleanup = fs::remove_file(created);
+            }
+            return Err(output_error("backup share", path, &error));
+        }
+        written.push(path.clone());
+    }
+    let report = BackupReport {
+        schema_version: 1,
+        identity_id: identity.identity_id().to_base64(),
+        fingerprint: super::fingerprint::proquints(identity.identity_id().as_bytes()),
+        share_count: command.share_count,
+        threshold: command.threshold,
+        shares: outputs
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::success("✓ Identity backup shares created"));
+        println!("  Identity ID  {}", report.identity_id);
+        println!("  Shares       {}", report.share_count);
+        println!("  Threshold    {}", report.threshold);
+        for path in &report.shares {
+            println!("  Share        {path}");
+        }
+        println!(
+            "\nAny {} shares reconstruct this identity without a passphrase.\nGive each share to a different trustee and never store them together.",
+            report.threshold
+        );
+        Ok(())
+    }
+}
+
+fn restore_identity_command(command: &IdentityRestoreCommand) -> Result<(), CliError> {
+    if command.private_key == command.public_key {
+        return Err(CliError::new(
+            EXIT_GENERIC,
+            "private and public identity outputs must differ",
+        ));
+    }
+    ensure_output_absent(&command.private_key)?;
+    ensure_output_absent(&command.public_key)?;
+    let shares = command
+        .shares
+        .iter()
+        .map(|path| {
+            let bytes = read_private_bounded_nofollow(path, MAX_IDENTITY_DOCUMENT_BYTES).map_err(
+                |error| {
+                    CliError::new(
+                        EXIT_POLICY,
+                        format!(
+                            "cannot safely read backup share {}: {error}",
+                            path.display()
+                        ),
+                    )
+                },
+            )?;
+            IdentityBackupShare::from_json(&bytes).map_err(chain_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let passphrase = read_passphrase(&command.passphrase, true)?;
+    let (private, public) =
+        restore_identity(&shares, passphrase.as_bytes()).map_err(chain_error)?;
+    write_new(
+        &command.private_key,
+        &private.to_json().map_err(chain_error)?,
+        true,
+    )
+    .map_err(|error| output_error("private identity", &command.private_key, &error))?;
+    if let Err(error) = write_new(
+        &command.public_key,
+        &public.to_json().map_err(chain_error)?,
+        false,
+    ) {
+        let _cleanup = fs::remove_file(&command.private_key);
+        return Err(output_error("public identity", &command.public_key, &error));
+    }
+    let report = identity_report(&public)?;
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::success("✓ Chain identity restored"));
+        println!("  Name            {}", report.display_name);
+        println!("  Identity ID     {}", report.identity_id);
+        println!("  Fingerprint");
+        println!(
+            "{}",
+            super::fingerprint::display_lines(&report.fingerprint, "    ")
+        );
+        println!("  Private bundle  {}", command.private_key.display());
+        println!("  Public package  {}", command.public_key.display());
+        println!(
+            "\nThe restored bundle uses the new passphrase; retire exposed shares by creating a fresh backup."
+        );
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupReport {
+    schema_version: u16,
+    identity_id: String,
+    fingerprint: String,
+    share_count: u8,
+    threshold: u8,
+    shares: Vec<String>,
 }
 
 fn create_group(command: &GroupCreateCommand) -> Result<(), CliError> {

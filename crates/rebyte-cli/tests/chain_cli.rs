@@ -10,6 +10,125 @@ use std::process::{Command, Output};
 use tempfile::tempdir;
 
 #[test]
+#[allow(clippy::too_many_lines)] // One scenario covers generate, backup, refusal and restore.
+fn identity_backup_shares_restore_the_same_identity() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let passphrase = directory.path().join("passphrase.txt");
+    write_private(&passphrase, b"chain integration passphrase\n")?;
+    let recovery_passphrase = directory.path().join("recovery.txt");
+    write_private(&recovery_passphrase, b"chain recovery passphrase\n")?;
+    let private = directory.path().join("owner.rbk");
+    let public = directory.path().join("owner.public.json");
+    let shares = directory.path().join("shares");
+    let restored_private = directory.path().join("restored.rbk");
+    let restored_public = directory.path().join("restored.public.json");
+
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "identity",
+                "generate",
+                "--name",
+                "Backup owner",
+                "--private-key",
+                path_text(&private)?,
+                "--public-key",
+                path_text(&public)?,
+                "--passphrase-file",
+                path_text(&passphrase)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "identity",
+                "backup",
+                "--private-key",
+                path_text(&private)?,
+                "--passphrase-file",
+                path_text(&passphrase)?,
+                "--share-count",
+                "3",
+                "--threshold",
+                "2",
+                "--output-dir",
+                path_text(&shares)?,
+                "--json",
+            ])
+            .output()?,
+    );
+
+    let insufficient = rebyte()
+        .args([
+            "chain",
+            "identity",
+            "restore",
+            "--share",
+            path_text(&shares.join("identity-share-2.json"))?,
+            "--private-key",
+            path_text(&restored_private)?,
+            "--public-key",
+            path_text(&restored_public)?,
+            "--passphrase-file",
+            path_text(&recovery_passphrase)?,
+        ])
+        .output()?;
+    assert!(!insufficient.status.success());
+
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "identity",
+                "restore",
+                "--share",
+                path_text(&shares.join("identity-share-1.json"))?,
+                "--share",
+                path_text(&shares.join("identity-share-3.json"))?,
+                "--private-key",
+                path_text(&restored_private)?,
+                "--public-key",
+                path_text(&restored_public)?,
+                "--passphrase-file",
+                path_text(&recovery_passphrase)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_eq!(fs::read(&public)?, fs::read(&restored_public)?);
+
+    let original_inspect = rebyte()
+        .args([
+            "chain",
+            "identity",
+            "inspect",
+            path_text(&public)?,
+            "--json",
+        ])
+        .output()?;
+    let restored_inspect = rebyte()
+        .args([
+            "chain",
+            "identity",
+            "inspect",
+            path_text(&restored_public)?,
+            "--json",
+        ])
+        .output()?;
+    assert_success(&original_inspect);
+    assert_success(&restored_inspect);
+    assert_eq!(
+        stdout_text(&original_inspect),
+        stdout_text(&restored_inspect)
+    );
+    Ok(())
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One scenario verifies every Chain state transition.
 fn consensus_capsule_reconstructs_directory_exactly() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
