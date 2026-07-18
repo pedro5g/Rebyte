@@ -4,6 +4,7 @@
 
 mod artifact_command;
 mod chain_command;
+mod fingerprint;
 mod hash_command;
 mod keys;
 mod producer;

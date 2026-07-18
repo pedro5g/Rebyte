@@ -578,11 +578,18 @@ fn generate_identity_command(command: &IdentityGenerateCommand) -> Result<(), Cl
         println!("{}", super::ui::success("✓ Chain identity generated"));
         println!("  Name            {}", report.display_name);
         println!("  Identity ID     {}", report.identity_id);
+        println!("  Fingerprint");
+        println!(
+            "{}",
+            super::fingerprint::display_lines(&report.fingerprint, "    ")
+        );
         println!("  Signing         Ed25519");
         println!("  Encryption      HPKE X25519/HKDF-SHA256/ChaCha20-Poly1305");
         println!("  Private bundle  {}", command.private_key.display());
         println!("  Public package  {}", command.public_key.display());
-        println!("\nKeep the private bundle and passphrase in separate verified backups.");
+        println!(
+            "\nKeep the private bundle and passphrase in separate verified backups.\nCompare the spoken fingerprint words out of band before trusting a copy."
+        );
         Ok(())
     }
 }
@@ -596,6 +603,11 @@ fn inspect_identity(command: &IdentityInspectCommand) -> Result<(), CliError> {
         println!("{}", super::ui::heading("Rebyte Chain identity"));
         println!("  Name         {}", report.display_name);
         println!("  Identity ID  {}", report.identity_id);
+        println!("  Fingerprint");
+        println!(
+            "{}",
+            super::fingerprint::display_lines(&report.fingerprint, "    ")
+        );
         println!("  Signing      Ed25519");
         println!("  Encryption   HPKE X25519/HKDF-SHA256/ChaCha20-Poly1305");
         println!("  Proof        valid");
@@ -1643,15 +1655,18 @@ struct IdentityReport {
     schema_version: u16,
     display_name: String,
     identity_id: String,
+    fingerprint: String,
     signing_algorithm: &'static str,
     encryption_algorithm: &'static str,
 }
 
 fn identity_report(public: &IdentityPublicDocument) -> Result<IdentityReport, CliError> {
+    let identity_id = public.identity_id().map_err(chain_error)?;
     Ok(IdentityReport {
         schema_version: 1,
         display_name: public.display_name().to_string(),
-        identity_id: public.identity_id().map_err(chain_error)?.to_base64(),
+        identity_id: identity_id.to_base64(),
+        fingerprint: super::fingerprint::proquints(identity_id.as_bytes()),
         signing_algorithm: "Ed25519",
         encryption_algorithm: "HPKE-X25519-HKDF-SHA256-ChaCha20Poly1305",
     })

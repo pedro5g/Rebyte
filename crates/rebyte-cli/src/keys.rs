@@ -223,11 +223,16 @@ fn generate(command: &GenerateCommand) -> Result<(), CliError> {
     } else {
         println!("{}", super::ui::success("✓ Publisher key generated"));
         println!("  Key ID       {}", report.key_id);
+        println!("  Fingerprint");
+        println!(
+            "{}",
+            super::fingerprint::display_lines(&report.fingerprint, "    ")
+        );
         println!("  Channel      {}", report.channel);
         println!("  Private key  {}", command.private_key.display());
         println!("  Public key   {}", command.public_key.display());
         println!(
-            "\nKeep the private key and passphrase separate; distribute only the public file."
+            "\nKeep the private key and passphrase separate; distribute only the public file.\nCompare the spoken fingerprint words out of band before trusting a copy."
         );
         Ok(())
     }
@@ -242,6 +247,11 @@ fn inspect(command: &InspectCommand) -> Result<(), CliError> {
         println!("{}", super::ui::heading("Rebyte publisher key"));
         println!("  Name       {}", report.display_name);
         println!("  Key ID     {}", report.key_id);
+        println!("  Fingerprint");
+        println!(
+            "{}",
+            super::fingerprint::display_lines(&report.fingerprint, "    ")
+        );
         println!("  Channel    {}", report.channel);
         println!("  Status     {}", report.status);
         println!("  Algorithm  Ed25519");
@@ -359,6 +369,7 @@ struct KeyReport {
     display_name: String,
     algorithm: &'static str,
     key_id: String,
+    fingerprint: String,
     public_key: String,
     channel: &'static str,
     status: &'static str,
@@ -366,15 +377,15 @@ struct KeyReport {
 
 impl KeyReport {
     fn from_document(document: &PublicKeyDocument) -> Result<Self, CliError> {
+        let key_id = document
+            .key_id()
+            .map_err(|error| CliError::new(EXIT_POLICY, error.to_string()))?;
         Ok(Self {
             schema_version: 1,
             display_name: document.display_name().to_string(),
             algorithm: "Ed25519",
-            key_id: encode_key_id(
-                &document
-                    .key_id()
-                    .map_err(|error| CliError::new(EXIT_POLICY, error.to_string()))?,
-            ),
+            key_id: encode_key_id(&key_id),
+            fingerprint: super::fingerprint::proquints(key_id.as_bytes()),
             public_key: encode_base64(
                 &document
                     .public_key()
