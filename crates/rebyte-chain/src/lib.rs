@@ -19,10 +19,14 @@ mod group;
 mod identity;
 mod release;
 mod secret_sharing;
+mod status;
 #[cfg(test)]
 mod vector_tests;
 
 pub use backup::{IdentityBackupShare, backup_identity, restore_identity};
+pub use status::{
+    IdentityStatus, IdentityStatusDocument, deny_statused_identities, issue_identity_status,
+};
 
 pub use envelope::{
     CAPSULE_TOKEN_PREFIX, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainLimits,

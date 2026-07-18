@@ -9,16 +9,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use rebyte_chain::{
     Capability, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError, ChainLimits,
     ContentKind as ContractContentKind, EncryptedIdentityDocument, GroupAcceptance,
-    GroupCertificate, GroupProposal, IdentityBackupShare, IdentityPublicDocument, OpenedContent,
-    QuorumProposalOptions, ReleaseGrant, ReleasePolicy, ReleaseRequest, TrustedClock,
-    UnlockedIdentity, accept_group, approve_capsule, backup_identity, create_capsule_proposal,
-    create_quorum_capsule_proposal, create_quorum_semantic_patch_proposal, create_release_request,
-    create_semantic_patch_proposal, finalize_capsule, finalize_group, generate_identity,
-    grant_release, open_capsule, open_quorum_content, open_semantic_patch, restore_identity,
+    GroupCertificate, GroupProposal, IdentityBackupShare, IdentityId, IdentityPublicDocument,
+    IdentityStatus, IdentityStatusDocument, OpenedContent, QuorumProposalOptions, ReleaseGrant,
+    ReleasePolicy, ReleaseRequest, TrustedClock, UnlockedIdentity, accept_group, approve_capsule,
+    backup_identity, create_capsule_proposal, create_quorum_capsule_proposal,
+    create_quorum_semantic_patch_proposal, create_release_request, create_semantic_patch_proposal,
+    deny_statused_identities, finalize_capsule, finalize_group, generate_identity, grant_release,
+    issue_identity_status, open_capsule, open_quorum_content, open_semantic_patch,
+    restore_identity,
 };
 use rebyte_core::{
     ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
@@ -74,6 +76,8 @@ enum IdentitySubcommand {
     Backup(IdentityBackupCommand),
     /// Reconstruct an identity from threshold recovery shares.
     Restore(IdentityRestoreCommand),
+    /// Issue a signed retired or revoked statement for this identity.
+    Status(IdentityStatusCommand),
 }
 
 #[derive(Debug, Args)]
@@ -105,6 +109,36 @@ struct IdentityInspectCommand {
     /// Emit stable JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct IdentityStatusCommand {
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// New administrative status; both reject the identity for new operations.
+    #[arg(long, value_enum)]
+    status: IdentityStatusArgument,
+    /// Signed status document output for distribution.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum IdentityStatusArgument {
+    Retired,
+    Revoked,
+}
+
+impl IdentityStatusArgument {
+    const fn to_status(self) -> IdentityStatus {
+        match self {
+            Self::Retired => IdentityStatus::Retired,
+            Self::Revoked => IdentityStatus::Revoked,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -172,6 +206,9 @@ struct GroupCreateCommand {
     /// Number of unique member approvals required for each capsule.
     #[arg(long, value_name = "T")]
     threshold: u16,
+    /// Signed status document; listed identities are rejected as members.
+    #[arg(long = "status-document", value_name = "PATH")]
+    status_documents: Vec<PathBuf>,
     /// New group-proposal document.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
@@ -285,6 +322,9 @@ struct CapsuleCreateCommand {
     /// Maximum fresh releases; finite limits require all witnesses.
     #[arg(long, value_name = "COUNT", requires = "witnesses")]
     maximum_releases: Option<u32>,
+    /// Signed status document; listed identities reject the whole capsule.
+    #[arg(long = "status-document", value_name = "PATH")]
+    status_documents: Vec<PathBuf>,
     /// New encrypted proposal awaiting group approvals.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
@@ -548,6 +588,7 @@ fn run_identity(command: &IdentityCommand) -> Result<(), CliError> {
         IdentitySubcommand::Inspect(command) => inspect_identity(command),
         IdentitySubcommand::Backup(command) => backup_identity_command(command),
         IdentitySubcommand::Restore(command) => restore_identity_command(command),
+        IdentitySubcommand::Status(command) => status_identity_command(command),
     }
 }
 
@@ -636,8 +677,62 @@ fn generate_identity_command(command: &IdentityGenerateCommand) -> Result<(), Cl
     }
 }
 
+fn status_identity_command(command: &IdentityStatusCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let identity = unlock_identity(&command.identity)?;
+    let document =
+        issue_identity_status(&identity, command.status.to_status()).map_err(chain_error)?;
+    write_new(
+        &command.output,
+        &document.to_json().map_err(chain_error)?,
+        false,
+    )
+    .map_err(|error| output_error("status document", &command.output, &error))?;
+    let report = status_report(&document)?;
+    if command.json {
+        write_json(&report)
+    } else {
+        println!(
+            "{}",
+            super::ui::success(&format!("✓ Identity status written · {}", report.status))
+        );
+        println!("  Name         {}", report.display_name);
+        println!("  Identity ID  {}", report.identity_id);
+        println!("  Output       {}", command.output.display());
+        println!(
+            "\nDistribute this document to every coordinator; supply it through\n--status-document so new groups and capsules reject the identity."
+        );
+        Ok(())
+    }
+}
+
 fn inspect_identity(command: &IdentityInspectCommand) -> Result<(), CliError> {
-    let public = read_public_identity(&command.public_key)?;
+    let bytes = read_bounded_nofollow(&command.public_key, MAX_IDENTITY_DOCUMENT_BYTES).map_err(
+        |error| {
+            CliError::new(
+                EXIT_POLICY,
+                format!(
+                    "cannot read Chain identity document {}: {error}",
+                    command.public_key.display()
+                ),
+            )
+        },
+    )?;
+    if let Ok(status) = IdentityStatusDocument::from_json(&bytes) {
+        let report = status_report(&status)?;
+        return if command.json {
+            write_json(&report)
+        } else {
+            println!("{}", super::ui::heading("Rebyte Chain identity status"));
+            println!("  Name         {}", report.display_name);
+            println!("  Identity ID  {}", report.identity_id);
+            println!("  Status       {}", report.status);
+            println!("  Signature    valid, issued by the identity itself");
+            println!("\nDo not admit this identity to new groups, recipients or witnesses.");
+            Ok(())
+        };
+    }
+    let public = IdentityPublicDocument::from_json(&bytes).map_err(chain_error)?;
     let report = identity_report(&public)?;
     if command.json {
         write_json(&report)
@@ -802,6 +897,12 @@ fn create_group(command: &GroupCreateCommand) -> Result<(), CliError> {
         .iter()
         .map(|path| read_public_identity(path))
         .collect::<Result<Vec<_>, _>>()?;
+    let status_documents = read_status_documents(&command.status_documents)?;
+    let member_ids = members
+        .iter()
+        .map(|member| member.identity_id().map_err(chain_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    enforce_status_documents(&status_documents, &member_ids, "proposed group member")?;
     let proposal =
         GroupProposal::new(&command.name, command.threshold, members).map_err(chain_error)?;
     write_new(
@@ -951,6 +1052,15 @@ fn create_capsule(command: &CapsuleCreateCommand) -> Result<(), CliError> {
         .iter()
         .map(|path| read_public_identity(path))
         .collect::<Result<Vec<_>, _>>()?;
+    let status_documents = read_status_documents(&command.status_documents)?;
+    let mut participant_ids = Vec::new();
+    for member in group.proposal().members() {
+        participant_ids.push(member.identity_id().map_err(chain_error)?);
+    }
+    for identity in recipients.iter().chain(&witnesses) {
+        participant_ids.push(identity.identity_id().map_err(chain_error)?);
+    }
+    enforce_status_documents(&status_documents, &participant_ids, "capsule participant")?;
     let proposal = if witnesses.is_empty() {
         if semantic_patch {
             create_semantic_patch_proposal(group, &content, recipients, &limits)
@@ -1674,6 +1784,34 @@ const fn capability_label(capability: Capability) -> &'static str {
     }
 }
 
+fn read_status_documents(paths: &[PathBuf]) -> Result<Vec<IdentityStatusDocument>, CliError> {
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = read_bounded_nofollow(path, MAX_IDENTITY_DOCUMENT_BYTES)
+                .map_err(|error| input_error("identity status document", path, &error))?;
+            IdentityStatusDocument::from_json(&bytes).map_err(chain_error)
+        })
+        .collect()
+}
+
+fn enforce_status_documents(
+    status_documents: &[IdentityStatusDocument],
+    identity_ids: &[IdentityId],
+    role: &str,
+) -> Result<(), CliError> {
+    deny_statused_identities(status_documents, identity_ids).map_err(|error| {
+        if matches!(error, ChainError::IdentityMismatch) {
+            CliError::new(
+                EXIT_POLICY,
+                format!("a supplied status document retires or revokes a {role}"),
+            )
+        } else {
+            chain_error(error)
+        }
+    })
+}
+
 fn read_public_identity(path: &Path) -> Result<IdentityPublicDocument, CliError> {
     let bytes = read_bounded_nofollow(path, MAX_IDENTITY_DOCUMENT_BYTES).map_err(|error| {
         CliError::new(
@@ -1849,6 +1987,31 @@ fn identity_report(public: &IdentityPublicDocument) -> Result<IdentityReport, Cl
         fingerprint: super::fingerprint::proquints(identity_id.as_bytes()),
         signing_algorithm: "Ed25519",
         encryption_algorithm: "HPKE-X25519-HKDF-SHA256-ChaCha20Poly1305",
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IdentityStatusReport {
+    schema_version: u16,
+    display_name: String,
+    identity_id: String,
+    fingerprint: String,
+    status: &'static str,
+}
+
+fn status_report(document: &IdentityStatusDocument) -> Result<IdentityStatusReport, CliError> {
+    let identity_id = document.identity_id().map_err(chain_error)?;
+    Ok(IdentityStatusReport {
+        schema_version: 1,
+        display_name: document.public_identity().display_name().to_string(),
+        identity_id: identity_id.to_base64(),
+        fingerprint: super::fingerprint::proquints(identity_id.as_bytes()),
+        status: match document.status().map_err(chain_error)? {
+            IdentityStatus::Retired => "retired",
+            IdentityStatus::Revoked => "revoked",
+            _ => "unknown",
+        },
     })
 }
 
