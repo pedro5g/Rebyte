@@ -763,10 +763,28 @@ Scheduled workflows add Miri, fuzzing, mutation sampling, coverage and
 benchmarks. Current measured targets and baselines are documented in
 [quality](docs/quality.md).
 
+## Documentation
+
+- [Concepts and problem map](docs/concepts.md): what each Rebyte layer solves
+  and how to choose it.
+- [System architecture](docs/architecture.md): components, trust ladder and
+  complete data lifecycle.
+- [CLI reference](docs/cli.md): every command, flag, output and exit code.
+- [Security model](docs/security-model.md) and [threat
+  model](docs/threat-model.md): guarantees, adversaries and explicit non-goals.
+- [Chain operations](docs/chain-operations.md): production key, witness,
+  backup and recovery procedures.
+- [Security review — 2026-07-18](docs/security-review-2026-07.md): findings
+  fixed in this hardening pass and residual risks.
+- [Protocol specifications](schemas/rap-v1.md): frozen canonical formats and
+  cryptographic bindings.
+
 ## Security
 
 No software is “100% secure”. Rebyte 1.2 provides a stable, fail-closed design
-and adversarial tests, but has not claimed an independent security audit.
+and adversarial tests, but has not received an independent security audit. The
+current maintainer review and its unresolved deployment assumptions are
+published in [docs/security-review-2026-07.md](docs/security-review-2026-07.md).
 Report suspected vulnerabilities privately according to
 [SECURITY.md](SECURITY.md); never attach production keys or secret material to
 a public issue.

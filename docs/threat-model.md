@@ -66,8 +66,8 @@ cooperative ledger or control fewer than the release threshold of witnesses.
 12. Release Chain plaintext only to a listed recipient after HPKE, AEAD,
     commitment and inner-artifact verification.
 13. For quorum contracts, release no CEK until a fresh recipient request and
-    `T` unique witness grants pass every signature, time, ledger and binding
-    check.
+    `T` unique witness grants with a coherent ledger ordinal pass every strict
+    signature, time, ledger and binding check.
 
 ## Explicit non-goals
 
@@ -106,5 +106,6 @@ keys, incomplete groups, threshold boundaries, duplicate approvals, proposal
 replay, unlisted recipients, multi-recipient byte equality, mutation,
 representative truncation, trailing bytes, canonical round trips, Shamir
 threshold subsets, early release, duplicate grants, wrong recipients, grant
-mutation, idempotent request replay and exhausted allowances. A
+mutation, mismatched ordinals, idempotent request replay, failed issuance
+without allowance consumption and exhausted allowances. A
 dedicated fuzz target exercises the bounded envelope parser.

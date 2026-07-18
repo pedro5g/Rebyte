@@ -45,7 +45,9 @@ The public package self-signs both keys, display name and a random nonce.
 passphrase-protected `.rbk` stores both private seeds under Argon2id
 (64 MiB, three iterations, one lane) and XChaCha20-Poly1305. Public identity,
 KDF parameters, salt and nonce are authenticated associated data. Unlocking
-re-derives and compares both public keys.
+re-derives and compares both public keys. Secret seeds and reconstructed
+Shamir shares remain in zeroizing containers, and debug output for encrypted
+private documents redacts ciphertext and KDF inputs.
 
 Group formation is always unanimous. `GroupId` commits the random group nonce,
 threshold and complete sorted public identity packages. Every member signs the
@@ -92,10 +94,12 @@ For quorum release, the CEK is split into `N` Shamir shares over GF(256) with
 threshold `T`; each witness receives one share under a distinct HPKE context.
 The recipient signs a fresh envelope-bound request. A witness validates that
 request, recipient, trusted time and release allowance, unwraps only its share,
-atomically records the request, encrypts the share to the recipient and signs
-the complete grant. Opening requires exactly `T` unique valid grants, verifies
-the canonical witness coordinate of every share, reconstructs the CEK and then
-repeats payload AEAD, digest, length and content decoding.
+constructs and signs a recipient-encrypted grant in memory, then atomically
+records the request before returning it. A construction failure consumes no
+allowance. Opening requires exactly `T` unique valid grants with one common
+ledger ordinal, verifies the canonical witness coordinate of every share,
+reconstructs the CEK and then repeats payload AEAD, digest, length and content
+decoding.
 
 Finite maximum-release policies require every witness (`T = N`). A repeated
 request is idempotent; a different request consumes another allowance. The
@@ -148,6 +152,10 @@ The key ID is the 32-byte `rebyte:v1:key-id` digest of the Ed25519 public key.
 It is an identifier, not an authorization decision. Trust channel and status
 come from the local keyring.
 
+All Ed25519 trust boundaries reject weak public keys and use strict signature
+verification. This applies to RAP publishers, Chain identity proofs, group
+acceptances, proposal approvals, release requests and witness grants.
+
 Chain uses distinct derive-key contexts for identity IDs, group IDs, group
 certificate digests, protected-content digests, proposal-core digests,
 ciphertext digests, proposal IDs and envelope IDs. Ed25519 messages and AEAD
@@ -176,6 +184,10 @@ verifies new bytes, copies recoverable backups, persists the journal and
 revalidates targets. Each replacement is an atomic rename within the target
 filesystem. A crash may expose a prefix of the requested changes, but the next
 run can inspect, roll back or resume the persisted transaction.
+
+Private keys and passphrase files are opened with `nofollow`. Regular-file
+type, size and private Unix permission checks are performed on the same opened
+handle that is read, avoiding a separate path-based permission-check window.
 
 ## Resource limits
 

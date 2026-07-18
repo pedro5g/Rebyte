@@ -23,7 +23,9 @@ after a fix is available.
 
 The project does not claim to be bug-free or independently audited. High-value
 deployments should review the protocol, signing integration and local
-filesystem assumptions in their own threat model.
+filesystem assumptions in their own threat model. The latest maintainer
+findings and residual risks are published in
+[the 2026-07 security review](docs/security-review-2026-07.md).
 
 Unsigned `ra1_`/`.rba` artifacts are a convenience transport with bounded
 decompression and digest verification. They do not authenticate an author,
