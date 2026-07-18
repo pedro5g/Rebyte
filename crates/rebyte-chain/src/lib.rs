@@ -18,6 +18,8 @@ mod group;
 mod identity;
 mod release;
 mod secret_sharing;
+#[cfg(test)]
+mod vector_tests;
 
 pub use envelope::{
     CAPSULE_TOKEN_PREFIX, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainLimits,
