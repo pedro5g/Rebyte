@@ -119,13 +119,17 @@ impl FileReleaseLedger {
 }
 
 impl ReleaseLedger for FileReleaseLedger {
-    fn authorize(&mut self, authorization: &ReleaseAuthorization) -> Result<u32, ChainError> {
+    fn authorize<T>(
+        &mut self,
+        authorization: &ReleaseAuthorization,
+        issue: impl FnOnce(u32) -> Result<T, ChainError>,
+    ) -> Result<T, ChainError> {
         if let Some(record) = self.records.iter().find(|record| {
             record.contract_id == *authorization.contract_id()
                 && record.proposal_id == *authorization.proposal_id()
                 && record.request_id == *authorization.request_id()
         }) {
-            return Ok(record.ordinal);
+            return issue(record.ordinal);
         }
         if self.records.len() >= MAX_RECORDS {
             return Err(ChainError::ReleaseAuthorityUnavailable);
@@ -148,18 +152,31 @@ impl ReleaseLedger for FileReleaseLedger {
         let ordinal = current
             .checked_add(1)
             .ok_or(ChainError::ReleaseAuthorityUnavailable)?;
+        let issued = issue(ordinal)?;
         let mut body = Vec::with_capacity(RECORD_BODY_BYTES);
         body.extend_from_slice(authorization.contract_id());
         body.extend_from_slice(authorization.proposal_id());
         body.extend_from_slice(authorization.request_id());
         body.extend_from_slice(&ordinal.to_be_bytes());
         let digest = record_digest(&self.witness_id, &self.previous_digest, &body);
-        self.file
+        let original_length = self
+            .file
+            .seek(SeekFrom::End(0))
+            .map_err(|_| ChainError::ReleaseAuthorityUnavailable)?;
+        if self
+            .file
             .seek(SeekFrom::End(0))
             .and_then(|_| self.file.write_all(&body))
             .and_then(|()| self.file.write_all(&digest))
             .and_then(|()| self.file.sync_all())
-            .map_err(|_| ChainError::ReleaseAuthorityUnavailable)?;
+            .is_err()
+        {
+            let _rollback = self
+                .file
+                .set_len(original_length)
+                .and_then(|()| self.file.sync_all());
+            return Err(ChainError::ReleaseAuthorityUnavailable);
+        }
         self.records.push(LedgerRecord {
             contract_id: *authorization.contract_id(),
             proposal_id: *authorization.proposal_id(),
@@ -167,7 +184,7 @@ impl ReleaseLedger for FileReleaseLedger {
             ordinal,
         });
         self.previous_digest = digest;
-        Ok(ordinal)
+        Ok(issued)
     }
 }
 
@@ -286,7 +303,7 @@ fn set_private_permissions(_file: &File) -> Result<(), ChainError> {
 
 #[cfg(test)]
 mod tests {
-    use rebyte_chain::{IdentityId, ReleaseAuthorization, ReleaseLedger};
+    use rebyte_chain::{ChainError, IdentityId, ReleaseAuthorization, ReleaseLedger};
 
     use super::FileReleaseLedger;
 
@@ -298,20 +315,34 @@ mod tests {
         let authorization = ReleaseAuthorization::from_parts([1; 32], [2; 32], [3; 32], Some(1));
         {
             let mut ledger = FileReleaseLedger::open(&path, IdentityId::from_bytes([4; 32]))?;
-            assert_eq!(ledger.authorize(&authorization)?, 1);
+            assert_eq!(ledger.authorize(&authorization, Ok)?, 1);
         }
         let mut ledger = FileReleaseLedger::open(&path, IdentityId::from_bytes([4; 32]))?;
-        assert_eq!(ledger.authorize(&authorization)?, 1);
+        assert_eq!(ledger.authorize(&authorization, Ok)?, 1);
         assert!(
             ledger
-                .authorize(&ReleaseAuthorization::from_parts(
-                    [1; 32],
-                    [2; 32],
-                    [5; 32],
-                    Some(1)
-                ))
+                .authorize(
+                    &ReleaseAuthorization::from_parts([1; 32], [2; 32], [5; 32], Some(1)),
+                    Ok
+                )
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_issuance_does_not_consume_the_allowance() -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("witness.ledger");
+        let authorization = ReleaseAuthorization::from_parts([1; 32], [2; 32], [3; 32], Some(1));
+        let mut ledger = FileReleaseLedger::open(&path, IdentityId::from_bytes([4; 32]))?;
+        assert!(matches!(
+            ledger.authorize(&authorization, |_| Err::<(), _>(
+                ChainError::CryptographicFailure
+            )),
+            Err(ChainError::CryptographicFailure)
+        ));
+        assert_eq!(ledger.authorize(&authorization, Ok)?, 1);
         Ok(())
     }
 }

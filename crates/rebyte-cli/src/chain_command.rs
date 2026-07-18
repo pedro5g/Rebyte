@@ -29,7 +29,7 @@ use rebyte_format::{ContentKind as FileContentKind, Digest32, RelativeArtifactPa
 use serde::Serialize;
 
 use super::keys::{PassphraseArgs, ensure_output_absent, read_passphrase};
-use super::security_io::{read_bounded_nofollow, require_private_permissions, write_new};
+use super::security_io::{read_bounded_nofollow, read_private_bounded_nofollow, write_new};
 use super::{
     CliError, EXIT_DIGEST, EXIT_GENERIC, EXIT_INVALID_SIGNATURE, EXIT_MALFORMED, EXIT_POLICY,
     write_json,
@@ -1496,21 +1496,12 @@ fn read_public_identity(path: &Path) -> Result<IdentityPublicDocument, CliError>
 }
 
 fn unlock_identity(args: &PrivateIdentityArgs) -> Result<UnlockedIdentity, CliError> {
-    require_private_permissions(&args.private_key).map_err(|error| {
-        CliError::new(
-            EXIT_POLICY,
-            format!(
-                "unsafe Chain private identity {}: {error}",
-                args.private_key.display()
-            ),
-        )
-    })?;
-    let bytes =
-        read_bounded_nofollow(&args.private_key, MAX_IDENTITY_DOCUMENT_BYTES).map_err(|error| {
+    let bytes = read_private_bounded_nofollow(&args.private_key, MAX_IDENTITY_DOCUMENT_BYTES)
+        .map_err(|error| {
             CliError::new(
                 EXIT_POLICY,
                 format!(
-                    "cannot read Chain private identity {}: {error}",
+                    "cannot safely read Chain private identity {}: {error}",
                     args.private_key.display()
                 ),
             )

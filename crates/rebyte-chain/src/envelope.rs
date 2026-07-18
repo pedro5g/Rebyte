@@ -5,7 +5,7 @@
 
 use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use hpke::aead::ChaCha20Poly1305 as HpkeChaCha20Poly1305;
 use hpke::kdf::HkdfSha256;
 use hpke::{
@@ -1324,29 +1324,32 @@ pub(super) fn unwrap_quorum_share(
         &witness_id,
         envelope.proposal.contract.release(),
     );
-    let share = single_shot_open::<HpkeChaCha20Poly1305, HkdfSha256, ChainKem>(
-        &OpModeR::Base,
-        &witness.hpke_private_key(),
-        &encapped_key,
-        &info,
-        &slot.wrapped_key,
-        &core_digest,
-    )
-    .map_err(|_| ChainError::CryptographicFailure)?;
-    let share: [u8; SHARE_BYTES] = share
-        .as_slice()
-        .try_into()
-        .map_err(|_| ChainError::InvalidShare)?;
+    let share = Zeroizing::new(
+        single_shot_open::<HpkeChaCha20Poly1305, HkdfSha256, ChainKem>(
+            &OpModeR::Base,
+            &witness.hpke_private_key(),
+            &encapped_key,
+            &info,
+            &slot.wrapped_key,
+            &core_digest,
+        )
+        .map_err(|_| ChainError::CryptographicFailure)?,
+    );
+    if share.len() != SHARE_BYTES {
+        return Err(ChainError::InvalidShare);
+    }
+    let mut bounded_share = Zeroizing::new([0_u8; SHARE_BYTES]);
+    bounded_share.as_mut().copy_from_slice(&share);
     let expected_x = policy
         .witnesses()
         .iter()
         .position(|candidate| candidate == &principal_id(witness_id))
         .and_then(|index| u8::try_from(index.saturating_add(1)).ok())
         .ok_or(ChainError::InvalidShare)?;
-    if share[0] != expected_x {
+    if bounded_share[0] != expected_x {
         return Err(ChainError::InvalidShare);
     }
-    Ok(Zeroizing::new(share))
+    Ok(bounded_share)
 }
 
 pub(super) fn opened_content(decrypted: DecryptedContent) -> Result<OpenedContent, ChainError> {
@@ -1392,7 +1395,7 @@ fn verify_capsule_approval(
     let verifying_key = VerifyingKey::from_bytes(&member.signing_public_key()?)
         .map_err(|_| ChainError::InvalidPublicKey)?;
     verifying_key
-        .verify(
+        .verify_strict(
             &approval_message(&group_id, &proposal.proposal_id, &member_id),
             &Signature::from_bytes(&decode_array(&approval.signature)?),
         )

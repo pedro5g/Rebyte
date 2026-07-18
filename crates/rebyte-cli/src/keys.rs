@@ -15,7 +15,7 @@ use rebyte_signer::{
 use serde::Serialize;
 use zeroize::Zeroizing;
 
-use super::security_io::{read_bounded_nofollow, require_private_permissions, write_new};
+use super::security_io::{read_bounded_nofollow, read_private_bounded_nofollow, write_new};
 use super::{CliError, EXIT_GENERIC, EXIT_POLICY, encode_key_id, write_json};
 
 const MAX_KEY_DOCUMENT_BYTES: u64 = 64 * 1_024;
@@ -150,18 +150,16 @@ pub(super) fn load_local_signer(
     private_key: &Path,
     passphrase: &PassphraseArgs,
 ) -> Result<(LocalKeySigner, KeyId), CliError> {
-    require_private_permissions(private_key).map_err(|error| {
-        CliError::new(
-            EXIT_POLICY,
-            format!("unsafe private key {}: {error}", private_key.display()),
-        )
-    })?;
-    let bytes = read_bounded_nofollow(private_key, MAX_KEY_DOCUMENT_BYTES).map_err(|error| {
-        CliError::new(
-            EXIT_POLICY,
-            format!("cannot read private key {}: {error}", private_key.display()),
-        )
-    })?;
+    let bytes =
+        read_private_bounded_nofollow(private_key, MAX_KEY_DOCUMENT_BYTES).map_err(|error| {
+            CliError::new(
+                EXIT_POLICY,
+                format!(
+                    "cannot safely read private key {}: {error}",
+                    private_key.display()
+                ),
+            )
+        })?;
     let document = EncryptedPrivateKeyDocument::from_json(&bytes).map_err(|error| {
         CliError::new(
             EXIT_POLICY,
@@ -303,20 +301,20 @@ pub(super) fn read_passphrase(
     confirm: bool,
 ) -> Result<Zeroizing<String>, CliError> {
     if let Some(path) = &args.passphrase_file {
-        require_private_permissions(path).map_err(|error| {
-            CliError::new(
-                EXIT_POLICY,
-                format!("unsafe passphrase file {}: {error}", path.display()),
-            )
-        })?;
-        let bytes = read_bounded_nofollow(path, MAX_PASSPHRASE_FILE_BYTES).map_err(|error| {
-            CliError::new(
-                EXIT_POLICY,
-                format!("cannot read passphrase file {}: {error}", path.display()),
-            )
-        })?;
-        let mut value = String::from_utf8(bytes)
-            .map_err(|_| CliError::new(EXIT_POLICY, "passphrase file is not UTF-8"))?;
+        let bytes = Zeroizing::new(
+            read_private_bounded_nofollow(path, MAX_PASSPHRASE_FILE_BYTES).map_err(|error| {
+                CliError::new(
+                    EXIT_POLICY,
+                    format!(
+                        "cannot safely read passphrase file {}: {error}",
+                        path.display()
+                    ),
+                )
+            })?,
+        );
+        let mut value = core::str::from_utf8(&bytes)
+            .map_err(|_| CliError::new(EXIT_POLICY, "passphrase file is not UTF-8"))?
+            .to_owned();
         if value.ends_with("\r\n") {
             value.truncate(value.len().saturating_sub(2));
         } else if value.ends_with('\n') {

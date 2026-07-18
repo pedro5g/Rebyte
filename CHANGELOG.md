@@ -41,6 +41,14 @@ and releases follow Semantic Versioning.
 
 ### Fixed
 
+- Reject weak Ed25519 public keys and use strict verification for publisher,
+  identity, group, proposal, request and witness signatures.
+- Make quorum grant issuance failure-atomic: cryptographic failure no longer
+  consumes a finite release allowance, and a quorum rejects mixed ordinals.
+- Keep decrypted identity seeds and reconstructed Shamir shares in zeroizing
+  memory and redact encrypted private documents from debug output.
+- Read private keys and passphrase files through one bounded no-follow handle,
+  eliminating the permission-check/reopen race.
 - Avoid reopening a completed semantic-patch backup through a read-only Windows
   handle before `FlushFileBuffers`; backup bytes remain synchronized by their
   writable creation handle.
@@ -54,6 +62,8 @@ and releases follow Semantic Versioning.
 
 ### Documentation
 
+- Add the complete concepts/problem map and publish the 2026-07 maintainer
+  security review with fixed findings, standards alignment and residual risks.
 - Specify the implemented Chain v2 and Access Contract v1 wire formats,
   security boundary, CLI, Rust API, modular layer diagram and multi-party flow;
   retain hardware authority adapters and the signed Merkle event history as

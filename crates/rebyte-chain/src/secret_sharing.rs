@@ -28,7 +28,7 @@ pub(super) fn split_secret(
 }
 
 pub(super) fn combine_shares(
-    shares: &[[u8; SHARE_BYTES]],
+    shares: &[Zeroizing<[u8; SHARE_BYTES]>],
     threshold: u8,
 ) -> Result<Zeroizing<[u8; SECRET_BYTES]>, ChainError> {
     validate_parameters(shares.len(), usize::from(threshold))?;
@@ -158,7 +158,11 @@ mod tests {
         for first in 0..3 {
             for second in (first + 1)..4 {
                 for third in (second + 1)..5 {
-                    let selected = [*shares[first], *shares[second], *shares[third]];
+                    let selected = [
+                        shares[first].clone(),
+                        shares[second].clone(),
+                        shares[third].clone(),
+                    ];
                     assert_eq!(combine_shares(&selected, 3)?.as_ref(), &secret);
                 }
             }
@@ -171,11 +175,11 @@ mod tests {
         let secret = [0x55; SECRET_BYTES];
         let coefficients = vec![0x73; SECRET_BYTES];
         let shares = split_with_coefficients(&secret, 3, 2, &coefficients)?;
-        assert!(combine_shares(&[*shares[0]], 2).is_err());
-        assert!(combine_shares(&[*shares[0], *shares[0]], 2).is_err());
-        let mut zero = *shares[1];
+        assert!(combine_shares(&[shares[0].clone()], 2).is_err());
+        assert!(combine_shares(&[shares[0].clone(), shares[0].clone()], 2).is_err());
+        let mut zero = shares[1].clone();
         zero[0] = 0;
-        assert!(combine_shares(&[*shares[0], zero], 2).is_err());
+        assert!(combine_shares(&[shares[0].clone(), zero], 2).is_err());
         Ok(())
     }
 }

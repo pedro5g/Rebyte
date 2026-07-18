@@ -8,7 +8,7 @@ use core::fmt;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use hpke::kem::X25519HkdfSha256;
 use hpke::{Deserializable as _, Kem as _, Serializable as _};
 use serde::{Deserialize, Serialize};
@@ -128,7 +128,11 @@ impl IdentityPublicDocument {
     /// Returns [`ChainError`] for malformed or invalid public key bytes.
     pub fn signing_public_key(&self) -> Result<[u8; 32], ChainError> {
         let bytes = decode_array(&self.signing_public_key)?;
-        VerifyingKey::from_bytes(&bytes).map_err(|_| ChainError::InvalidPublicKey)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&bytes).map_err(|_| ChainError::InvalidPublicKey)?;
+        if verifying_key.is_weak() {
+            return Err(ChainError::InvalidPublicKey);
+        }
         Ok(bytes)
     }
 
@@ -161,7 +165,7 @@ impl IdentityPublicDocument {
         let verifying_key = VerifyingKey::from_bytes(&signing_public_key)
             .map_err(|_| ChainError::InvalidPublicKey)?;
         verifying_key
-            .verify(&message, &Signature::from_bytes(&proof_signature))
+            .verify_strict(&message, &Signature::from_bytes(&proof_signature))
             .map_err(|_| ChainError::InvalidSignature)?;
         let expected = identity_id(&message, &proof_signature);
         if decode_array::<32>(&self.identity_id)? != expected.0 {
@@ -184,7 +188,7 @@ impl IdentityPublicDocument {
 }
 
 /// Passphrase-protected identity containing independent signing and HPKE seeds.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EncryptedIdentityDocument {
     schema_version: u16,
@@ -197,6 +201,18 @@ pub struct EncryptedIdentityDocument {
     salt: String,
     nonce: String,
     encrypted_secrets: String,
+}
+
+impl fmt::Debug for EncryptedIdentityDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncryptedIdentityDocument")
+            .field("schema_version", &self.schema_version)
+            .field("kind", &self.kind)
+            .field("public_identity", &self.public_identity)
+            .field("encrypted_material", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl EncryptedIdentityDocument {
@@ -260,21 +276,17 @@ impl EncryptedIdentityDocument {
                 )
                 .map_err(|_| ChainError::AuthenticationFailed)?,
         );
-        let signing_seed: [u8; SEED_BYTES] = plaintext
+        let signing_bytes = plaintext
             .get(..SEED_BYTES)
-            .ok_or(ChainError::IdentityMismatch)?
-            .try_into()
-            .map_err(|_| ChainError::IdentityMismatch)?;
-        let encryption_ikm: [u8; SEED_BYTES] = plaintext
+            .ok_or(ChainError::IdentityMismatch)?;
+        let encryption_bytes = plaintext
             .get(SEED_BYTES..SECRET_PLAINTEXT_BYTES)
-            .ok_or(ChainError::IdentityMismatch)?
-            .try_into()
-            .map_err(|_| ChainError::IdentityMismatch)?;
-        unlocked_from_seeds(
-            &signing_seed,
-            Zeroizing::new(encryption_ikm),
-            self.public_identity.clone(),
-        )
+            .ok_or(ChainError::IdentityMismatch)?;
+        let mut signing_seed = Zeroizing::new([0_u8; SEED_BYTES]);
+        signing_seed.as_mut().copy_from_slice(signing_bytes);
+        let mut encryption_ikm = Zeroizing::new([0_u8; SEED_BYTES]);
+        encryption_ikm.as_mut().copy_from_slice(encryption_bytes);
+        unlocked_from_seeds(&signing_seed, encryption_ikm, self.public_identity.clone())
     }
 
     fn validate(&self) -> Result<(), ChainError> {
@@ -566,4 +578,19 @@ pub(crate) fn deterministic_identity(
         nonce: [marker.wrapping_add(4); 24],
     };
     create_identity_documents(display_name, b"test-only-passphrase", &material)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deterministic_identity;
+
+    #[test]
+    fn encrypted_identity_debug_is_redacted() -> Result<(), Box<dyn std::error::Error>> {
+        let (private, _) = deterministic_identity(0x42, "Redaction test")?;
+        let debug = format!("{private:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&private.encrypted_secrets));
+        assert!(!debug.contains(&private.salt));
+        Ok(())
+    }
 }

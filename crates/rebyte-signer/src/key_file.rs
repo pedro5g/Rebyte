@@ -33,7 +33,7 @@ const KDF_ITERATIONS: u32 = 3;
 const KDF_LANES: u32 = 1;
 
 /// JSON document containing an encrypted Ed25519 seed and its public identity.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EncryptedPrivateKeyDocument {
     schema_version: u16,
@@ -44,6 +44,19 @@ pub struct EncryptedPrivateKeyDocument {
     salt: String,
     nonce: String,
     encrypted_seed: String,
+}
+
+impl fmt::Debug for EncryptedPrivateKeyDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncryptedPrivateKeyDocument")
+            .field("schema_version", &self.schema_version)
+            .field("kind", &self.kind)
+            .field("public_key", &self.public_key)
+            .field("key_id", &self.key_id)
+            .field("encrypted_material", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl EncryptedPrivateKeyDocument {
@@ -99,10 +112,11 @@ impl EncryptedPrivateKeyDocument {
                 )
                 .map_err(|_| KeyDocumentError::AuthenticationFailed)?,
         );
-        let seed = Zeroizing::new(
-            <[u8; SECRET_BYTES]>::try_from(plaintext.as_slice())
-                .map_err(|_| KeyDocumentError::InvalidDocument)?,
-        );
+        if plaintext.len() != SECRET_BYTES {
+            return Err(KeyDocumentError::InvalidDocument);
+        }
+        let mut seed = Zeroizing::new([0_u8; SECRET_BYTES]);
+        seed.as_mut().copy_from_slice(&plaintext);
         let signer = LocalKeySigner {
             key: SigningKey::from_bytes(&seed),
         };
@@ -592,6 +606,10 @@ mod tests {
     #[test]
     fn encrypted_document_round_trips_and_signs() -> Result<(), Box<dyn std::error::Error>> {
         let (private, public) = fixture()?;
+        let debug = format!("{private:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&private.encrypted_seed));
+        assert!(!debug.contains(&private.salt));
         let parsed_private = EncryptedPrivateKeyDocument::from_json(&private.to_json()?)?;
         let parsed_public = PublicKeyDocument::from_json(&public.to_json()?)?;
         let signer = parsed_private.unlock(PASSPHRASE)?;

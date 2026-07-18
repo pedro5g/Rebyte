@@ -3,7 +3,7 @@
 
 #![allow(clippy::redundant_pub_crate)]
 
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::codec::{decode_array, domain_hash, encode_base64, put_bytes_u16, put_u16, put_u32};
@@ -420,7 +420,7 @@ fn verify_acceptance(
     let public_key = VerifyingKey::from_bytes(&member.signing_public_key()?)
         .map_err(|_| ChainError::InvalidPublicKey)?;
     public_key
-        .verify(
+        .verify_strict(
             &acceptance_message(&group_id, &member_id),
             &Signature::from_bytes(&decode_array(&acceptance.signature)?),
         )

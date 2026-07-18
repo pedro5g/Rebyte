@@ -12,7 +12,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use rebyte_format::{Digest32, KeyId};
 use rebyte_integrity::{key_id, signature_message};
 
@@ -67,7 +67,11 @@ impl TrustedPublicKey {
         status: KeyStatus,
     ) -> Result<Self, SignatureError> {
         validate_name(display_name)?;
-        VerifyingKey::from_bytes(&public_key).map_err(|_| SignatureError::InvalidPublicKey)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&public_key).map_err(|_| SignatureError::InvalidPublicKey)?;
+        if verifying_key.is_weak() {
+            return Err(SignatureError::InvalidPublicKey);
+        }
         Ok(Self {
             id: key_id(&public_key),
             public_key,
@@ -223,7 +227,7 @@ pub fn verify_signature(
         .map_err(|_| SignatureError::InvalidPublicKey)?;
     let signature = Signature::from_bytes(signature_bytes);
     verifying_key
-        .verify(&signature_message(digest), &signature)
+        .verify_strict(&signature_message(digest), &signature)
         .map_err(|_| SignatureError::InvalidSignature)?;
     Ok(VerifiedPublisher {
         key_id: trusted.id(),
@@ -393,6 +397,21 @@ mod tests {
             Err(SignatureError::InvalidSignature)
         );
         Ok(())
+    }
+
+    #[test]
+    fn weak_public_key_is_rejected_at_trust_boundary() {
+        let mut identity_point = [0_u8; 32];
+        identity_point[0] = 1;
+        assert_eq!(
+            TrustedPublicKey::new(
+                "weak-test-key",
+                identity_point,
+                TrustChannel::Production,
+                KeyStatus::Active,
+            ),
+            Err(SignatureError::InvalidPublicKey)
+        );
     }
 
     #[test]

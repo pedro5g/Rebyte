@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use hpke::aead::ChaCha20Poly1305 as HpkeChaCha20Poly1305;
 use hpke::kdf::HkdfSha256;
 use hpke::{
@@ -118,7 +118,7 @@ impl ReleaseRequest {
         let verifying_key = VerifyingKey::from_bytes(&self.recipient.signing_public_key()?)
             .map_err(|_| ChainError::InvalidPublicKey)?;
         verifying_key
-            .verify(&message, &Signature::from_bytes(&signature))
+            .verify_strict(&message, &Signature::from_bytes(&signature))
             .map_err(|_| ChainError::InvalidSignature)?;
         if calculate_request_id(&message, &signature) != request_id {
             return Err(ChainError::InvalidRelease);
@@ -216,7 +216,7 @@ impl ReleaseGrant {
         let verifying_key = VerifyingKey::from_bytes(&self.witness.signing_public_key()?)
             .map_err(|_| ChainError::InvalidPublicKey)?;
         verifying_key
-            .verify(
+            .verify_strict(
                 &grant_signature_message(&grant_id, &witness_id),
                 &Signature::from_bytes(&signature),
             )
@@ -240,18 +240,24 @@ pub trait TrustedClock {
 
 /// Atomic durable state required for bounded release sessions.
 pub trait ReleaseLedger {
-    /// Authorizes or idempotently replays one exact request.
+    /// Issues a result and then authorizes or idempotently replays one request.
     ///
-    /// Implementations must atomically persist a new request before returning.
-    /// The returned ordinal starts at one. A repeated request ID must return
-    /// its original ordinal without consuming another allowance.
+    /// `issue` receives an ordinal starting at one. Implementations must invoke
+    /// it before committing a new request and persist the authorization only
+    /// when it succeeds. A repeated request ID must use its original ordinal
+    /// without consuming another allowance.
     ///
     /// # Errors
     ///
+    /// Propagates an error from `issue` without consuming an allowance.
     /// Returns [`ChainError::ReleaseLimitReached`] when no new session remains,
     /// or [`ChainError::ReleaseAuthorityUnavailable`] if durable state cannot
     /// be read or committed.
-    fn authorize(&mut self, authorization: &ReleaseAuthorization) -> Result<u32, ChainError>;
+    fn authorize<T>(
+        &mut self,
+        authorization: &ReleaseAuthorization,
+        issue: impl FnOnce(u32) -> Result<T, ChainError>,
+    ) -> Result<T, ChainError>;
 }
 
 /// Exact ledger scope and allowance for one release decision.
@@ -266,8 +272,7 @@ pub struct ReleaseAuthorization {
 impl ReleaseAuthorization {
     /// Creates an exact ledger decision from verified protocol identifiers.
     ///
-    /// Most callers receive this value through [`ReleaseLedger::authorize`];
-    /// this constructor supports durable-ledger restoration and testing.
+    /// This constructor supports durable-ledger implementations and testing.
     #[must_use]
     pub const fn from_parts(
         contract_id: [u8; 32],
@@ -318,7 +323,11 @@ pub struct MemoryReleaseLedger {
 }
 
 impl ReleaseLedger for MemoryReleaseLedger {
-    fn authorize(&mut self, authorization: &ReleaseAuthorization) -> Result<u32, ChainError> {
+    fn authorize<T>(
+        &mut self,
+        authorization: &ReleaseAuthorization,
+        issue: impl FnOnce(u32) -> Result<T, ChainError>,
+    ) -> Result<T, ChainError> {
         let requests = self
             .requests
             .entry((authorization.contract_id, authorization.proposal_id))
@@ -327,8 +336,9 @@ impl ReleaseLedger for MemoryReleaseLedger {
             .iter()
             .position(|request| request == &authorization.request_id)
         {
-            return u32::try_from(index.saturating_add(1))
-                .map_err(|_| ChainError::ReleaseAuthorityUnavailable);
+            let ordinal = u32::try_from(index.saturating_add(1))
+                .map_err(|_| ChainError::ReleaseAuthorityUnavailable)?;
+            return issue(ordinal);
         }
         let current =
             u32::try_from(requests.len()).map_err(|_| ChainError::ReleaseAuthorityUnavailable)?;
@@ -338,8 +348,12 @@ impl ReleaseLedger for MemoryReleaseLedger {
         {
             return Err(ChainError::ReleaseLimitReached);
         }
+        let ordinal = current
+            .checked_add(1)
+            .ok_or(ChainError::ReleaseAuthorityUnavailable)?;
+        let issued = issue(ordinal)?;
         requests.push(authorization.request_id);
-        u32::try_from(requests.len()).map_err(|_| ChainError::ReleaseAuthorityUnavailable)
+        Ok(issued)
     }
 }
 
@@ -428,7 +442,31 @@ pub fn grant_release(
         request_id,
         maximum_successful_releases: policy.maximum_successful_releases(),
     };
-    let release_ordinal = ledger.authorize(&authorization)?;
+    ledger.authorize(&authorization, |release_ordinal| {
+        issue_release_grant(
+            envelope,
+            request,
+            witness,
+            witness_id,
+            observed_unix_ms,
+            release_ordinal,
+            request_id,
+            &share,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)] // Every argument is an authenticated grant binding.
+fn issue_release_grant(
+    envelope: &CapsuleEnvelope,
+    request: &ReleaseRequest,
+    witness: &UnlockedIdentity,
+    witness_id: IdentityId,
+    observed_unix_ms: u64,
+    release_ordinal: u32,
+    request_id: [u8; 32],
+    share: &[u8; SHARE_BYTES],
+) -> Result<ReleaseGrant, ChainError> {
     let mut grant = ReleaseGrant {
         schema_version: DOCUMENT_VERSION,
         kind: GRANT_KIND.to_string(),
@@ -501,10 +539,17 @@ pub fn open_quorum_content(
     if grants.len() != usize::from(policy.threshold()) {
         return Err(ChainError::InsufficientApprovals);
     }
-    let mut shares = Vec::with_capacity(grants.len());
+    let mut shares: Vec<Zeroizing<[u8; SHARE_BYTES]>> = Vec::with_capacity(grants.len());
     let mut witness_ids = Vec::with_capacity(grants.len());
+    let mut common_ordinal = None;
     for grant in grants {
         let witness_id = verify_grant_binding(envelope, request, grant)?;
+        if common_ordinal
+            .replace(grant.release_ordinal)
+            .is_some_and(|ordinal| ordinal != grant.release_ordinal)
+        {
+            return Err(ChainError::InvalidRelease);
+        }
         if witness_ids.contains(&witness_id) {
             return Err(ChainError::DuplicateIdentity);
         }
@@ -528,20 +573,21 @@ pub fn open_quorum_content(
             )
             .map_err(|_| ChainError::CryptographicFailure)?,
         );
-        let share: [u8; SHARE_BYTES] = share
-            .as_slice()
-            .try_into()
-            .map_err(|_| ChainError::InvalidShare)?;
+        if share.len() != SHARE_BYTES {
+            return Err(ChainError::InvalidShare);
+        }
+        let mut bounded_share = Zeroizing::new([0_u8; SHARE_BYTES]);
+        bounded_share.as_mut().copy_from_slice(&share);
         let expected_x = policy
             .witnesses()
             .iter()
             .position(|candidate| candidate == &principal_id(witness_id))
             .and_then(|index| u8::try_from(index.saturating_add(1)).ok())
             .ok_or(ChainError::InvalidShare)?;
-        if share[0] != expected_x {
+        if bounded_share[0] != expected_x {
             return Err(ChainError::InvalidShare);
         }
-        shares.push(share);
+        shares.push(bounded_share);
     }
     shares.sort_unstable_by_key(|share| share[0]);
     let threshold = u8::try_from(policy.threshold()).map_err(|_| ChainError::InvalidThreshold)?;
@@ -665,8 +711,9 @@ mod tests {
 
     use super::{
         MemoryReleaseLedger, ReleaseAuthorization, ReleaseGrant, ReleaseLedger, TrustedClock,
-        create_release_request, grant_release, open_quorum_content,
+        create_release_request, grant_release, issue_release_grant, open_quorum_content,
     };
+    use crate::envelope::unwrap_quorum_share;
     use crate::group::deterministic_group;
     use crate::identity::deterministic_identity;
     use crate::{
@@ -685,7 +732,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)] // One expensive identity fixture covers all release boundaries.
-    fn trusted_time_and_unanimous_single_release_gate_plaintext()
+    fn trusted_time_and_unanimous_bounded_release_gate_plaintext()
     -> Result<(), Box<dyn std::error::Error>> {
         let (alice_private, alice_public) = deterministic_identity(0x11, "Alice")?;
         let (bob_private, bob_public) = deterministic_identity(0x22, "Bob")?;
@@ -709,7 +756,7 @@ mod tests {
                 alice.public_identity().clone(),
                 bob.public_identity().clone(),
             ],
-            QuorumProposalOptions::new(2, Some(2_000), Some(1)),
+            QuorumProposalOptions::new(2, Some(2_000), Some(2)),
             &limits,
         )?;
         let envelope = finalize_capsule(
@@ -755,6 +802,27 @@ mod tests {
             &mut bob_ledger,
             &limits,
         )?;
+        let bob_share = unwrap_quorum_share(&envelope, &bob, &limits)?;
+        let mismatched_bob_grant = issue_release_grant(
+            &envelope,
+            &request,
+            &bob,
+            bob.identity_id(),
+            2_001,
+            2,
+            request.request_id()?,
+            &bob_share,
+        )?;
+        assert!(matches!(
+            open_quorum_content(
+                &envelope,
+                &request,
+                &[alice_grant.clone(), mismatched_bob_grant],
+                &reader,
+                &limits
+            ),
+            Err(ChainError::InvalidRelease)
+        ));
         assert!(matches!(
             open_quorum_content(
                 &envelope,
@@ -811,10 +879,23 @@ mod tests {
         mutated_grant.push(b'\n');
         assert!(ReleaseGrant::from_json(&mutated_grant).is_err());
         let second_request = create_release_request(&envelope, &reader, &limits)?;
-        assert!(matches!(
+        assert_eq!(
             grant_release(
                 &envelope,
                 &second_request,
+                &alice,
+                &FixedClock(3_000),
+                &mut alice_ledger,
+                &limits
+            )?
+            .release_ordinal(),
+            2
+        );
+        let third_request = create_release_request(&envelope, &reader, &limits)?;
+        assert!(matches!(
+            grant_release(
+                &envelope,
+                &third_request,
                 &alice,
                 &FixedClock(3_000),
                 &mut alice_ledger,
@@ -834,15 +915,38 @@ mod tests {
             request_id: [3; 32],
             maximum_successful_releases: Some(1),
         };
-        assert_eq!(ledger.authorize(&authorization)?, 1);
-        assert_eq!(ledger.authorize(&authorization)?, 1);
+        assert_eq!(ledger.authorize(&authorization, Ok)?, 1);
+        assert_eq!(ledger.authorize(&authorization, Ok)?, 1);
         assert!(matches!(
-            ledger.authorize(&ReleaseAuthorization {
-                request_id: [4; 32],
-                ..authorization
-            }),
+            ledger.authorize(
+                &ReleaseAuthorization {
+                    request_id: [4; 32],
+                    ..authorization
+                },
+                Ok
+            ),
             Err(ChainError::ReleaseLimitReached)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_memory_issuance_does_not_consume_the_allowance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut ledger = MemoryReleaseLedger::default();
+        let authorization = ReleaseAuthorization {
+            contract_id: [1; 32],
+            proposal_id: [2; 32],
+            request_id: [3; 32],
+            maximum_successful_releases: Some(1),
+        };
+        assert!(matches!(
+            ledger.authorize(&authorization, |_| Err::<(), _>(
+                ChainError::CryptographicFailure
+            )),
+            Err(ChainError::CryptographicFailure)
+        ));
+        assert_eq!(ledger.authorize(&authorization, Ok)?, 1);
         Ok(())
     }
 }
