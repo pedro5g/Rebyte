@@ -55,6 +55,8 @@ pub enum ChainError {
     NonCanonicalEnvelope,
     /// The embedded unsigned artifact was malformed.
     InvalidArtifact,
+    /// Protected plaintext did not match its declared canonical content kind.
+    InvalidContent,
     /// The embedded access contract was malformed or did not bind the capsule.
     InvalidContract,
     /// The contract release mechanism is not implemented by this envelope.
@@ -94,6 +96,7 @@ impl fmt::Display for ChainError {
             Self::UnexpectedEof => "truncated Chain envelope",
             Self::NonCanonicalEnvelope => "non-canonical Chain envelope",
             Self::InvalidArtifact => "invalid embedded Rebyte artifact",
+            Self::InvalidContent => "invalid canonical protected Rebyte content",
             Self::InvalidContract => "invalid or mismatched Rebyte access contract",
             Self::UnsupportedReleasePolicy => {
                 "access-contract release policy is unsupported by this envelope"

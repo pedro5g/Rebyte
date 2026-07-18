@@ -52,13 +52,13 @@ threshold and complete sorted public identity packages. Every member signs the
 same `GroupId` together with its own `IdentityId`; a different private key
 cannot occupy that member slot.
 
-Capsule creation first fully verifies a canonical `.rba` and creates or
-validates a canonical Access Contract. The contract must exactly match the
-group, complete controller set, sealing threshold, recipients, content kind,
-artifact digest and exact byte length.
+Capsule creation first fully verifies a canonical `.rba` or Semantic Patch v1
+and creates or validates a canonical Access Contract. The contract must exactly
+match the group, complete controller set, sealing threshold, recipients,
+content kind, protected-content digest and exact byte length.
 
 Direct-recipient creation then generates a random 256-bit CEK and encrypts the
-artifact once with XChaCha20-Poly1305. RFC 9180
+content once with XChaCha20-Poly1305. RFC 9180
 HPKE Base mode with X25519-HKDF-SHA256, HKDF-SHA256 and ChaCha20-Poly1305 wraps
 the same CEK independently to every sorted recipient. The proposal commitment
 covers:
@@ -75,9 +75,10 @@ reordered data, approvals for another proposal and trailing bytes are rejected.
 
 Opening verifies the canonical envelope, group formation, approval threshold,
 all commitments and the exact recipient before HPKE decapsulation. Plaintext is
-released only after payload authentication, exact length/digest checks and
-full inner `.rba` decoding. CLI reconstruction uses exclusive output creation
-and does not overwrite an existing path. Contract-gated Chain diff and apply
+released only after payload authentication, exact length/digest checks and the
+strict decoder selected by the contract content kind. CLI reconstruction uses
+exclusive output creation and does not overwrite an existing path.
+Contract-gated Chain diff and apply
 convert the verified inner artifact into authenticated file/directory entries,
 then reuse the capability-confined transaction engine. Empty directories are
 journaled before creation; file staging, precondition checks, per-file renames,
@@ -96,8 +97,10 @@ plaintext or key material.
 
 ## Semantic patch boundary
 
-Semantic Patch v1 is a separate unsigned local format. The parser accepts at
-most 2 `MiB`, 512 operations, 64 pointer components and 1024 pointer bytes.
+Semantic Patch v1 is a separate local format. On its own it is unsigned; inside
+Chain v2 its exact canonical bytes are encrypted, contract-bound and approved
+before application. The parser accepts at most 2 `MiB`, 512 operations, 64
+pointer components and 1024 pointer bytes.
 Unknown fields, duplicate JSON object keys, invalid pointer escapes and
 unsupported TOML array paths are rejected. Values are data only: no expression,
 template, command, environment interpolation, network or lifecycle hook is
@@ -131,7 +134,7 @@ It is an identifier, not an authorization decision. Trust channel and status
 come from the local keyring.
 
 Chain uses distinct derive-key contexts for identity IDs, group IDs, group
-certificate digests, embedded artifact digests, proposal-core digests,
+certificate digests, protected-content digests, proposal-core digests,
 ciphertext digests, proposal IDs and envelope IDs. Ed25519 messages and AEAD
 associated data also carry distinct fixed byte domains. The exact v2 strings
 and binary layouts are frozen in [the Chain specification](../schemas/chain-v2.md).

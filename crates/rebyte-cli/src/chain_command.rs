@@ -11,9 +11,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::{Args, Subcommand};
 use rebyte_chain::{
     Capability, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError, ChainLimits,
-    EncryptedIdentityDocument, GroupAcceptance, GroupCertificate, GroupProposal,
-    IdentityPublicDocument, ReleasePolicy, UnlockedIdentity, accept_group, approve_capsule,
-    create_capsule_proposal, finalize_capsule, finalize_group, generate_identity, open_capsule,
+    ContentKind as ContractContentKind, EncryptedIdentityDocument, GroupAcceptance,
+    GroupCertificate, GroupProposal, IdentityPublicDocument, ReleasePolicy, UnlockedIdentity,
+    accept_group, approve_capsule, create_capsule_proposal, create_semantic_patch_proposal,
+    finalize_capsule, finalize_group, generate_identity, open_capsule, open_semantic_patch,
 };
 use rebyte_core::{
     ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
@@ -178,7 +179,7 @@ struct CapsuleCommand {
 
 #[derive(Debug, Subcommand)]
 enum CapsuleSubcommand {
-    /// Encrypt one canonical `.rba` for one or more public recipients.
+    /// Encrypt one canonical `.rba` or semantic patch for recipients.
     Create(CapsuleCreateCommand),
     /// Approve one exact encrypted proposal as a group member.
     Approve(CapsuleApproveCommand),
@@ -192,6 +193,8 @@ enum CapsuleSubcommand {
     Diff(CapsuleDiffCommand),
     /// Decrypt and transactionally apply an authorized artifact.
     Apply(CapsuleApplyCommand),
+    /// Decrypt and atomically apply an authorized semantic patch.
+    Patch(CapsulePatchCommand),
 }
 
 #[derive(Debug, Args)]
@@ -200,8 +203,21 @@ struct CapsuleCreateCommand {
     #[arg(long, value_name = "PATH")]
     group: PathBuf,
     /// Canonical `.rba` produced by `rebyte encode --format binary`.
-    #[arg(long, value_name = "PATH")]
-    artifact: PathBuf,
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "patch",
+        conflicts_with = "patch"
+    )]
+    artifact: Option<PathBuf>,
+    /// Canonical patch produced by `rebyte patch create`.
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "artifact",
+        conflicts_with = "artifact"
+    )]
+    patch: Option<PathBuf>,
     /// Public recipient identity; repeat for every person allowed to open.
     #[arg(long = "recipient", value_name = "PATH", required = true)]
     recipients: Vec<PathBuf>,
@@ -308,6 +324,22 @@ struct CapsuleApplyCommand {
 }
 
 #[derive(Debug, Args)]
+struct CapsulePatchCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// Existing JSON or TOML target file.
+    #[arg(long, value_name = "PATH")]
+    target: PathBuf,
+    #[command(flatten)]
+    mode: super::semantic_command::PatchApplyMode,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct PrivateIdentityArgs {
     /// Passphrase-protected Chain private identity.
     #[arg(long, value_name = "PATH")]
@@ -360,6 +392,7 @@ fn run_capsule(command: &CapsuleCommand) -> Result<(), CliError> {
         CapsuleSubcommand::Open(command) => open_capsule_command(command),
         CapsuleSubcommand::Diff(command) => diff_capsule_command(command),
         CapsuleSubcommand::Apply(command) => apply_capsule_command(command),
+        CapsuleSubcommand::Patch(command) => patch_capsule_command(command),
     }
 }
 
@@ -552,23 +585,46 @@ fn create_capsule(command: &CapsuleCreateCommand) -> Result<(), CliError> {
     ensure_output_absent(&command.output)?;
     let limits = ChainLimits::STANDARD;
     let group = read_group_certificate(&command.group)?;
-    let artifact = read_bounded_nofollow(&command.artifact, limits.artifact.max_capsule_bytes)
-        .map_err(|error| {
-            CliError::new(
-                EXIT_GENERIC,
-                format!(
-                    "cannot read Chain artifact {}: {error}",
-                    command.artifact.display()
-                ),
-            )
-        })?;
+    let (content, semantic_patch) = if let Some(path) = &command.artifact {
+        (
+            read_bounded_nofollow(path, limits.artifact.max_capsule_bytes).map_err(|error| {
+                CliError::new(
+                    EXIT_GENERIC,
+                    format!("cannot read Chain artifact {}: {error}", path.display()),
+                )
+            })?,
+            false,
+        )
+    } else if let Some(path) = &command.patch {
+        (
+            read_bounded_nofollow(path, rebyte_core::MAX_PATCH_BYTES).map_err(|error| {
+                CliError::new(
+                    EXIT_GENERIC,
+                    format!(
+                        "cannot read Chain semantic patch {}: {error}",
+                        path.display()
+                    ),
+                )
+            })?,
+            true,
+        )
+    } else {
+        return Err(CliError::new(
+            EXIT_MALFORMED,
+            "either --artifact or --patch is required",
+        ));
+    };
     let recipients = command
         .recipients
         .iter()
         .map(|path| read_public_identity(path))
         .collect::<Result<Vec<_>, _>>()?;
-    let proposal =
-        create_capsule_proposal(group, &artifact, recipients, &limits).map_err(chain_error)?;
+    let proposal = if semantic_patch {
+        create_semantic_patch_proposal(group, &content, recipients, &limits)
+    } else {
+        create_capsule_proposal(group, &content, recipients, &limits)
+    }
+    .map_err(chain_error)?;
     let bytes = proposal.to_bytes(&limits).map_err(chain_error)?;
     write_new(&command.output, &bytes, false)
         .map_err(|error| output_error("capsule proposal", &command.output, &error))?;
@@ -724,9 +780,9 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
     }
     let identity = unlock_identity(&command.identity)?;
     let opened = open_capsule(&envelope, &identity, &limits).map_err(chain_error)?;
-    let artifact_bytes = opened.artifact_binary();
+    let content_bytes = opened.artifact_binary();
     if command.raw_artifact {
-        write_new(&command.output, artifact_bytes, false)
+        write_new(&command.output, content_bytes, false)
             .map_err(|error| output_error("decrypted artifact", &command.output, &error))?;
     } else {
         let mut temporary = tempfile::Builder::new()
@@ -739,7 +795,7 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
                     format!("cannot stage decrypted Chain artifact: {error}"),
                 )
             })?;
-        temporary.write_all(artifact_bytes).map_err(|error| {
+        temporary.write_all(content_bytes).map_err(|error| {
             CliError::new(
                 EXIT_GENERIC,
                 format!("cannot stage decrypted Chain bytes: {error}"),
@@ -766,7 +822,7 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
         group_id: opened.group_id().to_base64(),
         proposal_id: encode(opened.proposal_id()),
         recipient_id: opened.recipient_id().to_base64(),
-        artifact_bytes: artifact_bytes.len(),
+        content_bytes: content_bytes.len(),
         raw_artifact: command.raw_artifact,
         output: command.output.display().to_string(),
     };
@@ -780,7 +836,7 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
         println!("  Recipient    {}", report.recipient_id);
         println!(
             "  Artifact     {} encrypted bytes verified",
-            report.artifact_bytes
+            report.content_bytes
         );
         println!("  Output       {}", report.output);
         Ok(())
@@ -891,6 +947,41 @@ fn apply_capsule_command(command: &CapsuleApplyCommand) -> Result<(), CliError> 
         }
         Ok(())
     }
+}
+
+fn patch_capsule_command(command: &CapsulePatchCommand) -> Result<(), CliError> {
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    if !envelope
+        .proposal()
+        .contract()
+        .capabilities()
+        .contains(Capability::ApplySemanticPatch)
+    {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "access contract does not grant semantic patch application",
+        ));
+    }
+    let identity = unlock_identity(&command.identity)?;
+    let opened = open_semantic_patch(&envelope, &identity, &limits).map_err(chain_error)?;
+    super::semantic_command::apply_patch_document(
+        opened.patch(),
+        &super::semantic_command::PatchApplyRequest {
+            target: &command.target,
+            mode: super::semantic_command::PatchApplyMode {
+                dry_run: command.mode.dry_run,
+                yes: command.mode.yes,
+                backup: command.mode.backup,
+            },
+            json: command.json,
+            authorization: Some(format!(
+                "Chain contract {} · proposal {}",
+                opened.contract_id().to_base64(),
+                encode(opened.proposal_id())
+            )),
+        },
+    )
 }
 
 struct AuthorizedFileSet {
@@ -1132,7 +1223,9 @@ fn read_capsule_input(
 fn chain_error(error: ChainError) -> CliError {
     let exit_code = match error {
         ChainError::InvalidSignature => EXIT_INVALID_SIGNATURE,
-        ChainError::IntegrityMismatch | ChainError::InvalidArtifact => EXIT_DIGEST,
+        ChainError::IntegrityMismatch
+        | ChainError::InvalidArtifact
+        | ChainError::InvalidContent => EXIT_DIGEST,
         ChainError::NotGroupMember
         | ChainError::NotRecipient
         | ChainError::IncompleteGroup
@@ -1281,8 +1374,9 @@ struct CapsuleReport {
     contract_id: String,
     group_id: String,
     proposal_id: String,
-    artifact_digest: String,
-    artifact_bytes: u64,
+    content_digest: String,
+    content_bytes: u64,
+    content_kind: &'static str,
     capabilities: Vec<&'static str>,
     release_policy: &'static str,
     recipients: Vec<CapsuleRecipientReport>,
@@ -1319,8 +1413,13 @@ impl CapsuleReport {
                 .map_err(chain_error)?
                 .to_base64(),
             proposal_id: encode(proposal.proposal_id()),
-            artifact_digest: encode(proposal.artifact_digest()),
-            artifact_bytes: proposal.artifact_size(),
+            content_digest: encode(proposal.content_digest()),
+            content_bytes: proposal.content_size(),
+            content_kind: match proposal.contract().content().kind() {
+                ContractContentKind::ExactArtifact => "exactArtifact",
+                ContractContentKind::SemanticPatch => "semanticPatch",
+                _ => "unknown",
+            },
             capabilities: capability_names(proposal),
             release_policy: match proposal.contract().release() {
                 ReleasePolicy::DirectRecipients => "directRecipients",
@@ -1350,7 +1449,10 @@ fn print_capsule_report(report: &CapsuleReport) {
     println!("  Contract      {}", report.contract_id);
     println!("  Group ID      {}", report.group_id);
     println!("  Proposal ID   {}", report.proposal_id);
-    println!("  Artifact      {} bytes", report.artifact_bytes);
+    println!(
+        "  Content       {} · {} bytes",
+        report.content_kind, report.content_bytes
+    );
     println!("  Release       {}", report.release_policy);
     println!("  Capabilities  {}", report.capabilities.join(", "));
     println!(
@@ -1371,7 +1473,7 @@ struct OpenReport {
     group_id: String,
     proposal_id: String,
     recipient_id: String,
-    artifact_bytes: usize,
+    content_bytes: usize,
     raw_artifact: bool,
     output: String,
 }

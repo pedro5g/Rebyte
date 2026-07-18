@@ -36,7 +36,8 @@ Chain envelope v2 provides:
 - an immutable contract binding group, threshold, recipients, capabilities,
   plaintext digest/size and content-key release mechanism;
 - one ciphertext shared with one or many explicitly listed recipients;
-- the existing byte-exact `.rba` file or directory artifact as content;
+- byte-exact `.rba` artifacts and canonical Semantic Patch v1 as protected
+  content kinds;
 - canonical binary `.rbe`, textual `rbe2_` and strict control documents;
 - native Rust and CLI APIs with no network dependency.
 
@@ -53,9 +54,10 @@ Envelope v2 does not provide:
   hardware enclaves or a network relay;
 - the signed Merkle event graph or a Chain WebAssembly storage API.
 
-Semantic patches remain a separate, signed content type. They can later be
-carried inside a Chain envelope without giving the patch language authority to
-execute code.
+Semantic patches remain a separate, non-executable content type and can be
+carried inside a Chain envelope. Encryption and group approval do not expand
+the patch language: values remain data, and no command, template, network
+request or lifecycle hook is evaluated.
 
 ## Modular security layers
 
@@ -137,9 +139,9 @@ An `.rbe` Rebyte Encrypted Envelope contains:
 - fixed magic, protocol version, suite identifiers and strict limits;
 - the complete unanimously accepted group certificate;
 - the canonical Access Contract and its domain-separated `ContractId`;
-- the digest and length of one canonical inner `.rba` artifact;
+- the kind, digest and length of one canonical `.rba` or semantic patch;
 - one HPKE slot per explicitly authorized recipient;
-- one XChaCha20-Poly1305 ciphertext of the complete `.rba`;
+- one XChaCha20-Poly1305 ciphertext of the complete protected content;
 - `T` or more unique group-member approvals;
 - proposal and envelope identifiers committing every security field.
 
@@ -250,8 +252,8 @@ sequenceDiagram
     A-->>C: Alice GroupAcceptance
     B-->>C: Bob GroupAcceptance
     C->>C: Verify N-of-N and finalize GroupCertificate
-    C->>C: Bind AccessContract to group, recipients and .rba
-    C->>C: Verify .rba, encrypt once, HPKE-wrap CEK for R
+    C->>C: Bind AccessContract to group, recipients and content
+    C->>C: Verify .rba or patch, encrypt once, HPKE-wrap CEK for R
     C->>A: CapsuleProposal(ProposalId)
     C->>B: Same canonical CapsuleProposal
     A-->>C: Sign GroupId + ProposalId + AliceId
@@ -259,15 +261,15 @@ sequenceDiagram
     C->>C: Verify 2-of-2 and finalize .rbe
     C-->>R: .rbe file or rbe2_ token
     R->>R: Verify contract, group, threshold, IDs and recipient slot
-    R->>R: HPKE unwrap CEK, AEAD decrypt, verify .rba
-    R->>R: Reconstruct exact file or directory
+    R->>R: HPKE unwrap CEK, AEAD decrypt, verify content
+    R->>R: Reconstruct exact tree or atomically apply patch
 ```
 
 The data and authorization paths meet only in the finalized envelope:
 
 ```mermaid
 flowchart LR
-    F[File or portable directory] --> A[Canonical .rba]
+    F[File, directory or semantic patch] --> A[Canonical protected content]
     A --> E[XChaCha20-Poly1305<br/>one payload ciphertext]
     K[Fresh random CEK] --> E
     K --> H1[HPKE slot · recipient 1]
@@ -376,10 +378,11 @@ No plaintext reaches a destination until all applicable stages succeed:
 5. Match the opener to one exact recipient slot.
 6. HPKE-decapsulate the CEK without exposing it in output or errors.
 7. Authenticate and decrypt the payload in bounded memory.
-8. Verify exact length and the domain-separated artifact digest.
-9. Decode the inner `.rba` and verify its root and per-file BLAKE3 digests.
-10. Reconstruct with the existing exclusive-output, no-symlink artifact
-    decoder.
+8. Verify exact length and the domain-separated protected-content digest.
+9. Select the strict `.rba` or Semantic Patch v1 decoder from the contract.
+10. Reconstruct through the no-symlink artifact decoder, or apply the patch
+    through semantic preconditions, preview, confirmation, atomic replacement
+    and post-write hashing.
 
 Failure at any stage returns a typed, non-secret error and creates no output.
 Authentication failures do not reveal partial CEK or plaintext bytes.
@@ -431,7 +434,9 @@ Completed gates:
 6. native Rust facade, complete CLI workflow and end-to-end reconstruction;
 7. contract-gated diff and recoverable apply, including explicit empty
    directories and the cross-platform transaction journal;
-8. mutation, representative truncation, wrong-key, threshold and fuzz-harness
+8. encrypted canonical semantic patches with capability-gated preview,
+   preconditions, backup and atomic application;
+9. mutation, representative truncation, wrong-key, threshold and fuzz-harness
    coverage.
 
 Remaining independent gates:

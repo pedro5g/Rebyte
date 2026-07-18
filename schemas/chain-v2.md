@@ -8,7 +8,8 @@ has not received an independent cryptographic audit.
 
 ## Scope
 
-Chain envelope v2 transports one canonical Rebyte `.rba` artifact with:
+Chain envelope v2 transports one canonical Rebyte `.rba` artifact or one
+canonical Semantic Patch v1 document with:
 
 - self-custodied identities containing independent signing and encryption keys;
 - unanimous proof-of-possession when a group is formed;
@@ -16,7 +17,8 @@ Chain envelope v2 transports one canonical Rebyte `.rba` artifact with:
 - a canonical Access Contract binding content, controllers, recipients,
   capabilities and the content-key release mechanism;
 - one payload ciphertext and one HPKE-wrapped content key per recipient;
-- byte-exact file or portable-directory reconstruction after full validation.
+- byte-exact file/directory reconstruction or bounded semantic application
+  after full validation.
 
 The capsule sealing threshold authorizes envelope creation. It does not
 require members to come online again for each open. Every listed recipient can
@@ -108,8 +110,8 @@ CapsuleProposal {
     group_certificate     bytes32
     access_contract       bytes32
     proposal_nonce        [32]byte
-    artifact_digest       [32]byte
-    artifact_size         u64
+    content_digest        [32]byte
+    content_size          u64
     payload_nonce         [24]byte
     recipient_count       u16
     recipients[recipient_count] {
@@ -123,15 +125,16 @@ CapsuleProposal {
 ```
 
 Recipients are sorted and unique by `IdentityId`; v2 permits 1 to 64. The
-inner artifact is fully decoded and verified before encryption. The encoder:
+protected content is fully decoded and verified before encryption. The encoder:
 
 1. validates that the contract exactly binds the group ID, complete controller
-   set, sealing threshold, recipient set, artifact digest, artifact size and
-   exact-artifact content kind;
+   set, sealing threshold, recipient set, content digest, content size and
+   content kind;
 2. rejects quorum release rather than weakening it to direct recipient slots;
 3. generates a fresh 32-byte CEK, proposal nonce and payload nonce;
 4. computes the group-certificate, contract and proposal-core commitments;
-5. encrypts the complete canonical `.rba` once with XChaCha20-Poly1305;
+5. encrypts the complete canonical `.rba` or patch once with
+   XChaCha20-Poly1305;
 6. uses RFC 9180 HPKE independently for each public X25519 recipient key;
 7. wraps only the same 32-byte CEK in each recipient slot;
 8. computes `ProposalId` over the group, contract, recipients, HPKE slots and
@@ -195,6 +198,7 @@ under new authorization semantics.
 | Canonical Access Contract | 16 KiB |
 | Textual `rbe2_` token | 52 MiB |
 | Inner artifact policy | `SecurityLimits::SIMPLE_ARTIFACT` |
+| Semantic patch plaintext | 2 MiB |
 
 Every declared length uses checked conversion and arithmetic. Unknown versions
 or suites, zero recipients, duplicates, non-canonical ordering, truncation,
@@ -202,7 +206,7 @@ trailing bytes and limit violations are rejected.
 
 ## Opening order
 
-Plaintext `.rba` bytes are released only after:
+Protected plaintext is released only after:
 
 1. bounding the token or binary input;
 2. strict Base64URL decoding when textual;
@@ -217,9 +221,12 @@ Plaintext `.rba` bytes are released only after:
 10. finding the opener's exact recipient identity and `decrypt` capability;
 11. HPKE-decapsulating that recipient's CEK slot;
 12. authenticating and decrypting the payload;
-13. checking the exact plaintext length and Chain artifact digest;
-14. decoding and fully verifying the inner canonical `.rba`;
-15. reconstructing through the existing exclusive, no-symlink artifact path.
+13. checking the exact plaintext length and protected-content digest;
+14. selecting the strict decoder from the contract content kind;
+15. decoding the inner canonical `.rba` or Semantic Patch v1;
+16. reconstructing through the exclusive no-symlink path, or applying
+    semantic operations through precondition, preview, confirmation, atomic
+    replacement and post-write verification.
 
 Cryptographic failures do not expose partial keys or plaintext in error
 messages. Existing output paths are never overwritten by the CLI.

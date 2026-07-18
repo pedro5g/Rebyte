@@ -89,16 +89,16 @@ struct ApplyCommand {
 }
 
 #[derive(Debug, Args)]
-struct PatchApplyMode {
+pub(super) struct PatchApplyMode {
     /// Validate and preview without modifying the target.
     #[arg(long)]
-    dry_run: bool,
+    pub(super) dry_run: bool,
     /// Apply without the interactive confirmation prompt.
     #[arg(long)]
-    yes: bool,
+    pub(super) yes: bool,
     /// Retain the exact original as `<target>.rebyte.bak`.
     #[arg(long)]
-    backup: bool,
+    pub(super) backup: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -166,38 +166,65 @@ fn inspect(command: &InspectCommand) -> Result<(), CliError> {
 }
 
 fn apply(command: &ApplyCommand) -> Result<(), CliError> {
-    if command.mode.dry_run && command.mode.yes {
+    let patch = read_patch(&command.patch)?;
+    apply_patch_document(
+        &patch,
+        &PatchApplyRequest {
+            target: &command.target,
+            mode: PatchApplyMode {
+                dry_run: command.mode.dry_run,
+                yes: command.mode.yes,
+                backup: command.mode.backup,
+            },
+            json: command.json,
+            authorization: None,
+        },
+    )
+}
+
+pub(super) struct PatchApplyRequest<'a> {
+    pub(super) target: &'a Path,
+    pub(super) mode: PatchApplyMode,
+    pub(super) json: bool,
+    pub(super) authorization: Option<String>,
+}
+
+pub(super) fn apply_patch_document(
+    patch: &SemanticPatch,
+    request: &PatchApplyRequest<'_>,
+) -> Result<(), CliError> {
+    if request.mode.dry_run && request.mode.yes {
         return Err(CliError::new(
             EXIT_MALFORMED,
             "--dry-run conflicts with --yes",
         ));
     }
-    let patch = read_patch(&command.patch)?;
-    let original = read_bounded_nofollow(&command.target, SecurityLimits::V1.max_single_file_bytes)
+    let original = read_bounded_nofollow(request.target, SecurityLimits::V1.max_single_file_bytes)
         .map_err(|error| {
             CliError::new(
                 EXIT_GENERIC,
                 format!("cannot read semantic patch target: {error}"),
             )
         })?;
-    let result = apply_semantic_patch(&patch, &original).map_err(semantic_error)?;
+    let result = apply_semantic_patch(patch, &original).map_err(semantic_error)?;
     let report = ApplyReport {
         schema_version: 1,
         format: format_name(patch.format()),
-        target: command.target.to_string_lossy().into_owned(),
+        target: request.target.to_string_lossy().into_owned(),
+        authorization: request.authorization.clone(),
         operations: result.operations_applied(),
         changed: result.changed(),
         before_digest: encode_digest(&result.before_digest()),
         after_digest: encode_digest(&result.after_digest()),
-        dry_run: command.mode.dry_run,
+        dry_run: request.mode.dry_run,
         applied: false,
         backup: None,
     };
-    if command.mode.dry_run || !result.changed() {
-        return emit_apply_report(command, &report, &original, result.bytes());
+    if request.mode.dry_run || !result.changed() {
+        return emit_apply_report(request, &report, &original, result.bytes());
     }
-    if !command.mode.yes {
-        if command.json {
+    if !request.mode.yes {
+        if request.json {
             eprintln!(
                 "Semantic patch preview: {} operation(s), {} -> {}",
                 report.operations, report.before_digest, report.after_digest
@@ -205,30 +232,28 @@ fn apply(command: &ApplyCommand) -> Result<(), CliError> {
         } else {
             emit_preview(&report, &original, result.bytes());
         }
-        if !confirm(&command.target)? {
-            if command.json {
+        if !confirm(request.target)? {
+            if request.json {
                 return write_json(&report);
             }
             println!("Semantic patch cancelled · no files were written.");
             return Ok(());
         }
     }
-    revalidate_target(&command.target, &result.before_digest())?;
-    let backup = if command.mode.backup {
-        Some(create_backup(&command.target, &original)?)
+    revalidate_target(request.target, &result.before_digest())?;
+    let backup = if request.mode.backup {
+        Some(create_backup(request.target, &original)?)
     } else {
         None
     };
-    replace_atomically(&command.target, result.bytes(), &result.before_digest())?;
-    let committed =
-        read_bounded_nofollow(&command.target, SecurityLimits::V1.max_single_file_bytes).map_err(
-            |error| {
-                CliError::new(
-                    EXIT_GENERIC,
-                    format!("cannot verify patched target: {error}"),
-                )
-            },
-        )?;
+    replace_atomically(request.target, result.bytes(), &result.before_digest())?;
+    let committed = read_bounded_nofollow(request.target, SecurityLimits::V1.max_single_file_bytes)
+        .map_err(|error| {
+            CliError::new(
+                EXIT_GENERIC,
+                format!("cannot verify patched target: {error}"),
+            )
+        })?;
     if !digest_matches(&file_digest(&committed), &result.after_digest()) {
         return Err(CliError::new(
             EXIT_DIGEST,
@@ -240,7 +265,7 @@ fn apply(command: &ApplyCommand) -> Result<(), CliError> {
         backup: backup.map(|path| path.to_string_lossy().into_owned()),
         ..report
     };
-    if command.json {
+    if request.json {
         write_json(&report)
     } else {
         println!(
@@ -253,12 +278,12 @@ fn apply(command: &ApplyCommand) -> Result<(), CliError> {
 }
 
 fn emit_apply_report(
-    command: &ApplyCommand,
+    request: &PatchApplyRequest<'_>,
     report: &ApplyReport,
     before: &[u8],
     after: &[u8],
 ) -> Result<(), CliError> {
-    if command.json {
+    if request.json {
         write_json(report)
     } else {
         emit_preview(report, before, after);
@@ -294,6 +319,9 @@ fn emit_preview(report: &ApplyReport, before: &[u8], after: &[u8]) {
 }
 
 fn print_apply_summary(report: &ApplyReport) {
+    if let Some(authorization) = &report.authorization {
+        println!("  Authorized  {authorization}");
+    }
     println!("  Format      {}", report.format);
     println!("  Target      {}", report.target);
     println!("  Operations  {}", report.operations);
@@ -543,6 +571,7 @@ struct ApplyReport {
     schema_version: u16,
     format: &'static str,
     target: String,
+    authorization: Option<String>,
     operations: u32,
     changed: bool,
     before_digest: String,

@@ -19,8 +19,9 @@ mod identity;
 
 pub use envelope::{
     CAPSULE_TOKEN_PREFIX, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainLimits,
-    OpenedCapsule, approve_capsule, create_capsule_proposal, create_capsule_proposal_with_contract,
-    finalize_capsule, open_capsule,
+    OpenedCapsule, OpenedSemanticPatch, approve_capsule, create_capsule_proposal,
+    create_capsule_proposal_with_contract, create_content_proposal_with_contract,
+    create_semantic_patch_proposal, finalize_capsule, open_capsule, open_semantic_patch,
 };
 pub use error::ChainError;
 pub use group::{
@@ -39,12 +40,14 @@ pub use rebyte_contract::{
 mod tests {
     use rebyte_artifact_token::{Artifact, ArtifactOptions, encode_artifact};
     use rebyte_format::SecurityLimits;
+    use rebyte_semantic::{PatchFormat, PatchOperation, SemanticPatch};
 
     use super::{
         AccessContract, Capabilities, CapsuleEnvelope, ChainError, ChainLimits, ContentCommitment,
         ContentKind, PrincipalId, QuorumRelease, ReleasePolicy, accept_group, approve_capsule,
-        create_capsule_proposal, create_capsule_proposal_with_contract, finalize_capsule,
-        finalize_group, open_capsule,
+        create_capsule_proposal, create_capsule_proposal_with_contract,
+        create_semantic_patch_proposal, finalize_capsule, finalize_group, open_capsule,
+        open_semantic_patch,
     };
     use crate::group::{deterministic_group, replace_acceptance_signature};
     use crate::identity::deterministic_identity;
@@ -103,6 +106,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One multi-party fixture covers exact and patch content.
     fn threshold_consensus_encrypts_once_for_multiple_recipients()
     -> Result<(), Box<dyn std::error::Error>> {
         let (alice_private, alice_public) = deterministic_identity(0x51, "Alice")?;
@@ -129,7 +133,7 @@ mod tests {
         let artifact = artifact_bytes()?;
         let limits = ChainLimits::STANDARD;
         let proposal = create_capsule_proposal(
-            group,
+            group.clone(),
             &artifact,
             vec![alice.public_identity().clone(), reader_public],
             &limits,
@@ -183,6 +187,52 @@ mod tests {
             open_capsule(&reparsed, &carol, &limits),
             Err(ChainError::NotRecipient)
         ));
+
+        let patch = SemanticPatch::new(
+            PatchFormat::Json,
+            None,
+            vec![PatchOperation::Set {
+                path: "/service/port".to_string(),
+                value: serde_json::json!(8080),
+            }],
+        )?;
+        let patch_bytes = patch.to_json_bytes()?;
+        let compact_patch = serde_json::to_vec(&patch)?;
+        assert!(matches!(
+            create_semantic_patch_proposal(
+                group.clone(),
+                &compact_patch,
+                vec![reader.public_identity().clone()],
+                &limits,
+            ),
+            Err(ChainError::InvalidContent)
+        ));
+        let patch_proposal = create_semantic_patch_proposal(
+            group,
+            &patch_bytes,
+            vec![reader.public_identity().clone()],
+            &limits,
+        )?;
+        assert_eq!(
+            patch_proposal.contract().content().kind(),
+            ContentKind::SemanticPatch
+        );
+        let patch_envelope = finalize_capsule(
+            patch_proposal.clone(),
+            vec![
+                approve_capsule(&patch_proposal, &alice, &limits)?,
+                approve_capsule(&patch_proposal, &bob, &limits)?,
+            ],
+            &limits,
+        )?;
+        assert_eq!(
+            open_semantic_patch(&patch_envelope, &reader, &limits)?.patch(),
+            &patch
+        );
+        assert!(matches!(
+            open_capsule(&patch_envelope, &reader, &limits),
+            Err(ChainError::InvalidContent)
+        ));
         Ok(())
     }
 
@@ -212,11 +262,11 @@ mod tests {
         ));
         assert_eq!(
             proposal.contract().content().digest(),
-            proposal.artifact_digest()
+            proposal.content_digest()
         );
         assert_eq!(
             proposal.contract().content().size(),
-            proposal.artifact_size()
+            proposal.content_size()
         );
         let quorum = QuorumRelease::new(
             vec![PrincipalId::from_bytes(*identity.identity_id().as_bytes())],
@@ -228,8 +278,8 @@ mod tests {
             PrincipalId::from_bytes(*group.group_id()?.as_bytes()),
             ContentCommitment::new(
                 ContentKind::ExactArtifact,
-                *proposal.artifact_digest(),
-                proposal.artifact_size(),
+                *proposal.content_digest(),
+                proposal.content_size(),
             ),
         )
         .controllers(

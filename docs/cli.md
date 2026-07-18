@@ -287,19 +287,24 @@ rebyte chain capsule create --group GROUP.json --artifact ARTIFACT.rba
   --recipient ALICE.public.json
   [--recipient BOB.public.json ...]
   --output CAPSULE.proposal.rbep [--json]
+
+rebyte chain capsule create --group GROUP.json --patch PATCH.json
+  --recipient ALICE.public.json
+  --output PATCH.proposal.rbep [--json]
 ```
 
-The input must be a canonical `.rba` already produced by
-`rebyte encode --format binary`. Rebyte fully verifies it, generates a fresh
-256-bit content-encryption key, encrypts the artifact once with
-XChaCha20-Poly1305 and wraps that same key independently to every recipient
-using RFC 9180 HPKE. Recipients are sorted, unique and limited to 64.
+Exactly one input is required. `--artifact` accepts a canonical `.rba` produced
+by `rebyte encode --format binary`; `--patch` accepts canonical output from
+`rebyte patch create`. Rebyte fully verifies the selected content, generates a
+fresh 256-bit content-encryption key, encrypts it once with XChaCha20-Poly1305
+and wraps that same key independently to every recipient using RFC 9180 HPKE.
+Recipients are sorted, unique and limited to 64.
 
 Rebyte also creates a direct-release Access Contract that binds the complete
-group controller set, sealing threshold, artifact digest and length, recipient
-identities and exact-artifact capabilities. The resulting `ProposalId` commits
-that contract, the group certificate, HPKE slots and ciphertext digest. A group
-member is not implicitly a recipient.
+group controller set, sealing threshold, content kind/digest/length, recipient
+identities and the exact-artifact or semantic-patch capabilities. The resulting
+`ProposalId` commits that contract, the group certificate, HPKE slots and
+ciphertext digest. A group member is not implicitly a recipient.
 
 ### `chain capsule approve`
 
@@ -397,6 +402,21 @@ per-file atomic rename, post-write digest and rollback engine as signed RAP.
 Explicit empty directories are journaled before creation and are removed on
 rollback when they did not exist before the transaction. `--backup` retains
 the committed journal and original bytes for an explicit later rollback.
+
+### `chain capsule patch`
+
+```text
+rebyte chain capsule patch --file PATCH.rbe
+  --private-key RECIPIENT.rbk [--passphrase-file PATH]
+  --target CONFIG.json [--dry-run | --yes] [--backup] [--json]
+```
+
+Requires an `applySemanticPatch` contract and canonical semantic-patch
+plaintext. Consensus, contract, recipient HPKE, AEAD, digest and patch schema
+are verified before the target is read. Patch preconditions and `test`
+operations run before preview; commit revalidates the original digest, stages
+beside the target, atomically replaces it and hashes the committed result.
+`--backup` preserves the exact original bytes as `<target>.rebyte.bak`.
 
 ## Consumer commands
 

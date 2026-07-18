@@ -20,6 +20,9 @@ and releases follow Semantic Versioning.
 - Contract-gated `chain capsule diff` and recoverable `chain capsule apply`
   commands, sharing the RAP transaction engine and preserving explicit empty
   directories through journaled creation and rollback.
+- Canonical Semantic Patch v1 as a first-class encrypted Chain content kind,
+  with `chain capsule create --patch` and contract-gated `chain capsule patch`
+  preview, confirmation, backup and atomic application.
 - Complete `rebyte chain identity`, `chain group` and `chain capsule` CLI
   workflows, stable JSON reports and byte-exact file/directory integration
   coverage.

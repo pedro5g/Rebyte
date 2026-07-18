@@ -278,6 +278,29 @@ rebyte chain capsule apply --file project.rbe \
   --root ./existing-project --yes --backup
 ```
 
+Semantic patches can use the same confidential consensus envelope:
+
+```console
+rebyte patch create --format json \
+  --operation 'set:/service/port=8080' \
+  --output emergency.patch.json
+
+rebyte chain capsule create \
+  --group owners.group.json \
+  --patch emergency.patch.json \
+  --recipient alice.public.json \
+  --output emergency.proposal.rbep
+
+# Collect approvals and finalize exactly as above, then:
+rebyte chain capsule patch --file emergency.rbe \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --target ./service.json --dry-run
+
+rebyte chain capsule patch --file emergency.rbe \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --target ./service.json --yes --backup
+```
+
 Capsule approval authorizes creation of that exact envelope; it is not a fresh
 approval ceremony every time a listed recipient opens it. Chain v2 direct
 release rejects time and single-release restrictions. Such conditions belong

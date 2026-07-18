@@ -15,6 +15,7 @@ use rebyte_contract::{
     PrincipalId, ReleasePolicy,
 };
 use rebyte_format::SecurityLimits;
+use rebyte_semantic::{MAX_PATCH_BYTES, SemanticPatch, parse_patch};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -89,8 +90,8 @@ pub struct CapsuleProposal {
     group: GroupCertificate,
     contract: AccessContract,
     proposal_nonce: [u8; 32],
-    artifact_digest: [u8; 32],
-    artifact_size: u64,
+    content_digest: [u8; 32],
+    content_size: u64,
     payload_nonce: [u8; PAYLOAD_NONCE_BYTES],
     slots: Vec<RecipientSlot>,
     ciphertext: Vec<u8>,
@@ -122,8 +123,8 @@ impl CapsuleProposal {
         let contract =
             AccessContract::from_bytes(&contract_bytes).map_err(|_| ChainError::InvalidContract)?;
         let proposal_nonce = reader.array()?;
-        let artifact_digest = reader.array()?;
-        let artifact_size = reader.u64()?;
+        let content_digest = reader.array()?;
+        let content_size = reader.u64()?;
         let payload_nonce = reader.array()?;
         let slot_count = usize::from(reader.u16()?);
         if slot_count == 0 || slot_count > MAX_RECIPIENTS {
@@ -150,8 +151,8 @@ impl CapsuleProposal {
             group,
             contract,
             proposal_nonce,
-            artifact_digest,
-            artifact_size,
+            content_digest,
+            content_size,
             payload_nonce,
             slots,
             ciphertext,
@@ -189,8 +190,8 @@ impl CapsuleProposal {
                 .map_err(|_| ChainError::InvalidContract)?,
         )?;
         output.extend_from_slice(&self.proposal_nonce);
-        output.extend_from_slice(&self.artifact_digest);
-        put_u64(&mut output, self.artifact_size);
+        output.extend_from_slice(&self.content_digest);
+        put_u64(&mut output, self.content_size);
         output.extend_from_slice(&self.payload_nonce);
         put_u16(
             &mut output,
@@ -225,16 +226,16 @@ impl CapsuleProposal {
         &self.proposal_id
     }
 
-    /// Returns the digest of the exact embedded `.rba` bytes.
+    /// Returns the digest of the exact protected plaintext content.
     #[must_use]
-    pub const fn artifact_digest(&self) -> &[u8; 32] {
-        &self.artifact_digest
+    pub const fn content_digest(&self) -> &[u8; 32] {
+        &self.content_digest
     }
 
-    /// Returns the exact plaintext `.rba` length.
+    /// Returns the exact protected plaintext length.
     #[must_use]
-    pub const fn artifact_size(&self) -> u64 {
-        self.artifact_size
+    pub const fn content_size(&self) -> u64 {
+        self.content_size
     }
 
     /// Returns the explicitly authorized recipients.
@@ -248,10 +249,15 @@ impl CapsuleProposal {
         if self.slots.is_empty() || self.slots.len() > MAX_RECIPIENTS {
             return Err(ChainError::LimitExceeded);
         }
-        if self.artifact_size > limits.artifact.max_capsule_bytes {
+        if self.content_size > limits.artifact.max_capsule_bytes {
             return Err(ChainError::LimitExceeded);
         }
-        let expected_ciphertext = usize::try_from(self.artifact_size)
+        if self.contract.content().kind() == ContentKind::SemanticPatch
+            && self.content_size > MAX_PATCH_BYTES
+        {
+            return Err(ChainError::LimitExceeded);
+        }
+        let expected_ciphertext = usize::try_from(self.content_size)
             .map_err(|_| ChainError::LengthOverflow)?
             .checked_add(PAYLOAD_TAG_BYTES)
             .ok_or(ChainError::LengthOverflow)?;
@@ -274,8 +280,8 @@ impl CapsuleProposal {
         validate_contract_bindings(
             &self.group,
             &self.contract,
-            &self.artifact_digest,
-            self.artifact_size,
+            &self.content_digest,
+            self.content_size,
             &self
                 .slots
                 .iter()
@@ -518,6 +524,56 @@ pub struct OpenedCapsule {
     recipient_id: IdentityId,
 }
 
+/// Successfully decrypted, contract-bound and canonical semantic patch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenedSemanticPatch {
+    patch: SemanticPatch,
+    contract_id: rebyte_contract::ContractId,
+    group_id: GroupId,
+    proposal_id: [u8; 32],
+    recipient_id: IdentityId,
+}
+
+impl OpenedSemanticPatch {
+    /// Returns the validated semantic patch.
+    #[must_use]
+    pub const fn patch(&self) -> &SemanticPatch {
+        &self.patch
+    }
+
+    /// Returns the contract that authorized patch decryption.
+    #[must_use]
+    pub const fn contract_id(&self) -> rebyte_contract::ContractId {
+        self.contract_id
+    }
+
+    /// Returns the authorizing group.
+    #[must_use]
+    pub const fn group_id(&self) -> GroupId {
+        self.group_id
+    }
+
+    /// Returns the authorized encrypted proposal.
+    #[must_use]
+    pub const fn proposal_id(&self) -> &[u8; 32] {
+        &self.proposal_id
+    }
+
+    /// Returns the recipient identity used to decrypt the patch.
+    #[must_use]
+    pub const fn recipient_id(&self) -> IdentityId {
+        self.recipient_id
+    }
+}
+
+struct DecryptedContent {
+    bytes: Vec<u8>,
+    contract_id: rebyte_contract::ContractId,
+    group_id: GroupId,
+    proposal_id: [u8; 32],
+    recipient_id: IdentityId,
+}
+
 impl core::fmt::Debug for OpenedCapsule {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
@@ -583,37 +639,36 @@ pub fn create_capsule_proposal(
     recipients: Vec<IdentityPublicDocument>,
     limits: &ChainLimits,
 ) -> Result<CapsuleProposal, ChainError> {
-    group.validate()?;
-    enforce_length(artifact_binary.len(), limits.artifact.max_capsule_bytes)?;
-    decode_artifact(artifact_binary, &limits.artifact).map_err(|_| ChainError::InvalidArtifact)?;
-    let recipients = canonical_recipients(recipients)?;
-    let artifact_digest = artifact_digest(artifact_binary);
-    let artifact_size =
-        u64::try_from(artifact_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
-    let group_id = group.group_id()?;
-    let controllers = group
-        .proposal()
-        .members()
-        .iter()
-        .map(IdentityPublicDocument::identity_id)
-        .map(|result| result.map(principal_id))
-        .collect::<Result<Vec<_>, _>>()?;
-    let recipient_ids = recipients
-        .iter()
-        .map(IdentityPublicDocument::identity_id)
-        .map(|result| result.map(principal_id))
-        .collect::<Result<Vec<_>, _>>()?;
-    let contract = AccessContract::builder(
-        PrincipalId::from_bytes(*group_id.as_bytes()),
-        ContentCommitment::new(ContentKind::ExactArtifact, artifact_digest, artifact_size),
+    create_default_content_proposal(
+        group,
+        artifact_binary,
+        recipients,
+        ContentKind::ExactArtifact,
+        Capabilities::APPLY_EXACT,
+        limits,
     )
-    .controllers(controllers, group.capsule_threshold())
-    .recipients(recipient_ids)
-    .capabilities(Capabilities::APPLY_EXACT)
-    .release(ReleasePolicy::DirectRecipients)
-    .build()
-    .map_err(map_contract_error)?;
-    create_capsule_proposal_with_contract(group, artifact_binary, recipients, contract, limits)
+}
+
+/// Encrypts one canonical semantic patch for explicit recipients.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] for a non-canonical or invalid patch, group,
+/// recipient, resource violation or cryptographic failure.
+pub fn create_semantic_patch_proposal(
+    group: GroupCertificate,
+    patch_binary: &[u8],
+    recipients: Vec<IdentityPublicDocument>,
+    limits: &ChainLimits,
+) -> Result<CapsuleProposal, ChainError> {
+    create_default_content_proposal(
+        group,
+        patch_binary,
+        recipients,
+        ContentKind::SemanticPatch,
+        Capabilities::APPLY_PATCH,
+        limits,
+    )
 }
 
 /// Encrypts one verified `.rba` under an explicit canonical access contract.
@@ -634,13 +689,34 @@ pub fn create_capsule_proposal_with_contract(
     contract: AccessContract,
     limits: &ChainLimits,
 ) -> Result<CapsuleProposal, ChainError> {
+    if contract.content().kind() != ContentKind::ExactArtifact {
+        return Err(ChainError::InvalidContract);
+    }
+    create_content_proposal_with_contract(group, artifact_binary, recipients, contract, limits)
+}
+
+/// Encrypts canonical protected content under an explicit Access Contract.
+///
+/// Exact artifacts and semantic patches are validated by their own bounded
+/// canonical decoders before encryption. The contract content kind selects the
+/// decoder and is authenticated by every proposal approval.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] for invalid content or a contract binding mismatch.
+pub fn create_content_proposal_with_contract(
+    group: GroupCertificate,
+    content_binary: &[u8],
+    recipients: Vec<IdentityPublicDocument>,
+    contract: AccessContract,
+    limits: &ChainLimits,
+) -> Result<CapsuleProposal, ChainError> {
     group.validate()?;
-    enforce_length(artifact_binary.len(), limits.artifact.max_capsule_bytes)?;
-    decode_artifact(artifact_binary, &limits.artifact).map_err(|_| ChainError::InvalidArtifact)?;
+    validate_plaintext_content(content_binary, contract.content().kind(), limits)?;
     let recipients = canonical_recipients(recipients)?;
-    let artifact_digest = artifact_digest(artifact_binary);
-    let artifact_size =
-        u64::try_from(artifact_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
+    let content_digest = protected_content_digest(content_binary);
+    let content_size =
+        u64::try_from(content_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
     let recipient_ids: Vec<_> = recipients
         .iter()
         .map(IdentityPublicDocument::identity_id)
@@ -648,8 +724,8 @@ pub fn create_capsule_proposal_with_contract(
     validate_contract_bindings(
         &group,
         &contract,
-        &artifact_digest,
-        artifact_size,
+        &content_digest,
+        content_size,
         &recipient_ids,
     )?;
 
@@ -676,7 +752,7 @@ pub fn create_capsule_proposal_with_contract(
         .encrypt(
             &XNonce::from(payload_nonce),
             Payload {
-                msg: artifact_binary,
+                msg: content_binary,
                 aad: &payload_aad(&core),
             },
         )
@@ -714,8 +790,8 @@ pub fn create_capsule_proposal_with_contract(
         group,
         contract,
         proposal_nonce,
-        artifact_digest,
-        artifact_size,
+        content_digest,
+        content_size,
         payload_nonce,
         slots,
         ciphertext,
@@ -724,6 +800,46 @@ pub fn create_capsule_proposal_with_contract(
     proposal.proposal_id = calculate_proposal_id(&proposal)?;
     proposal.validate(limits)?;
     Ok(proposal)
+}
+
+fn create_default_content_proposal(
+    group: GroupCertificate,
+    content_binary: &[u8],
+    recipients: Vec<IdentityPublicDocument>,
+    kind: ContentKind,
+    capabilities: Capabilities,
+    limits: &ChainLimits,
+) -> Result<CapsuleProposal, ChainError> {
+    group.validate()?;
+    validate_plaintext_content(content_binary, kind, limits)?;
+    let recipients = canonical_recipients(recipients)?;
+    let content_digest = protected_content_digest(content_binary);
+    let content_size =
+        u64::try_from(content_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
+    let group_id = group.group_id()?;
+    let controllers = group
+        .proposal()
+        .members()
+        .iter()
+        .map(IdentityPublicDocument::identity_id)
+        .map(|result| result.map(principal_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let recipient_ids = recipients
+        .iter()
+        .map(IdentityPublicDocument::identity_id)
+        .map(|result| result.map(principal_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let contract = AccessContract::builder(
+        PrincipalId::from_bytes(*group_id.as_bytes()),
+        ContentCommitment::new(kind, content_digest, content_size),
+    )
+    .controllers(controllers, group.capsule_threshold())
+    .recipients(recipient_ids)
+    .capabilities(capabilities)
+    .release(ReleasePolicy::DirectRecipients)
+    .build()
+    .map_err(map_contract_error)?;
+    create_content_proposal_with_contract(group, content_binary, recipients, contract, limits)
 }
 
 /// Signs one exact encrypted proposal as a group member.
@@ -804,6 +920,50 @@ pub fn open_capsule(
     recipient: &UnlockedIdentity,
     limits: &ChainLimits,
 ) -> Result<OpenedCapsule, ChainError> {
+    if envelope.proposal.contract.content().kind() != ContentKind::ExactArtifact {
+        return Err(ChainError::InvalidContent);
+    }
+    let opened = decrypt_content(envelope, recipient, limits)?;
+    Ok(OpenedCapsule {
+        artifact_binary: opened.bytes,
+        contract_id: opened.contract_id,
+        group_id: opened.group_id,
+        proposal_id: opened.proposal_id,
+        recipient_id: opened.recipient_id,
+    })
+}
+
+/// Opens a fully authorized canonical semantic patch.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] unless the envelope contract binds semantic-patch
+/// content and all consensus, recipient, AEAD, digest and canonical checks
+/// succeed.
+pub fn open_semantic_patch(
+    envelope: &CapsuleEnvelope,
+    recipient: &UnlockedIdentity,
+    limits: &ChainLimits,
+) -> Result<OpenedSemanticPatch, ChainError> {
+    if envelope.proposal.contract.content().kind() != ContentKind::SemanticPatch {
+        return Err(ChainError::InvalidContent);
+    }
+    let opened = decrypt_content(envelope, recipient, limits)?;
+    let patch = parse_patch(&opened.bytes).map_err(|_| ChainError::InvalidContent)?;
+    Ok(OpenedSemanticPatch {
+        patch,
+        contract_id: opened.contract_id,
+        group_id: opened.group_id,
+        proposal_id: opened.proposal_id,
+        recipient_id: opened.recipient_id,
+    })
+}
+
+fn decrypt_content(
+    envelope: &CapsuleEnvelope,
+    recipient: &UnlockedIdentity,
+    limits: &ChainLimits,
+) -> Result<DecryptedContent, ChainError> {
     envelope.validate(limits)?;
     if !matches!(
         envelope.proposal.contract.release(),
@@ -857,7 +1017,7 @@ pub fn open_capsule(
     }
     let payload_cipher = XChaCha20Poly1305::new_from_slice(cek.as_slice())
         .map_err(|_| ChainError::CryptographicFailure)?;
-    let artifact_binary = payload_cipher
+    let content_binary = payload_cipher
         .decrypt(
             &XNonce::from(envelope.proposal.payload_nonce),
             Payload {
@@ -866,15 +1026,19 @@ pub fn open_capsule(
             },
         )
         .map_err(|_| ChainError::CryptographicFailure)?;
-    if u64::try_from(artifact_binary.len()).map_err(|_| ChainError::LengthOverflow)?
-        != envelope.proposal.artifact_size
-        || artifact_digest(&artifact_binary) != envelope.proposal.artifact_digest
+    if u64::try_from(content_binary.len()).map_err(|_| ChainError::LengthOverflow)?
+        != envelope.proposal.content_size
+        || protected_content_digest(&content_binary) != envelope.proposal.content_digest
     {
         return Err(ChainError::IntegrityMismatch);
     }
-    decode_artifact(&artifact_binary, &limits.artifact).map_err(|_| ChainError::InvalidArtifact)?;
-    Ok(OpenedCapsule {
-        artifact_binary,
+    validate_plaintext_content(
+        &content_binary,
+        envelope.proposal.contract.content().kind(),
+        limits,
+    )?;
+    Ok(DecryptedContent {
+        bytes: content_binary,
         contract_id: envelope.proposal.contract.contract_id(),
         group_id,
         proposal_id: envelope.proposal.proposal_id,
@@ -973,11 +1137,40 @@ fn calculate_envelope_id(
     ))
 }
 
-fn artifact_digest(artifact_binary: &[u8]) -> [u8; 32] {
+fn protected_content_digest(content_binary: &[u8]) -> [u8; 32] {
     domain_hash(
-        "Rebyte Chain embedded artifact digest v2 2026-07-18",
-        &[artifact_binary],
+        "Rebyte Chain protected content digest v2 2026-07-18",
+        &[content_binary],
     )
+}
+
+fn validate_plaintext_content(
+    content_binary: &[u8],
+    kind: ContentKind,
+    limits: &ChainLimits,
+) -> Result<(), ChainError> {
+    match kind {
+        ContentKind::ExactArtifact => {
+            enforce_length(content_binary.len(), limits.artifact.max_capsule_bytes)?;
+            decode_artifact(content_binary, &limits.artifact)
+                .map(|_| ())
+                .map_err(|_| ChainError::InvalidArtifact)
+        }
+        ContentKind::SemanticPatch => {
+            enforce_length(content_binary.len(), MAX_PATCH_BYTES)?;
+            let patch = parse_patch(content_binary).map_err(|_| ChainError::InvalidContent)?;
+            if patch
+                .to_json_bytes()
+                .map_err(|_| ChainError::InvalidContent)?
+                .as_slice()
+                != content_binary
+            {
+                return Err(ChainError::InvalidContent);
+            }
+            Ok(())
+        }
+        _ => Err(ChainError::InvalidContent),
+    }
 }
 
 fn payload_aad(core: &[u8]) -> Vec<u8> {
@@ -1027,8 +1220,8 @@ fn canonical_recipients(
 fn validate_contract_bindings(
     group: &GroupCertificate,
     contract: &AccessContract,
-    artifact_digest: &[u8; 32],
-    artifact_size: u64,
+    content_digest: &[u8; 32],
+    content_size: u64,
     recipient_ids: &[IdentityId],
 ) -> Result<(), ChainError> {
     let contract_bytes = contract
@@ -1040,9 +1233,8 @@ fn validate_contract_bindings(
     let group_id = group.group_id()?;
     if contract.group_id() != PrincipalId::from_bytes(*group_id.as_bytes())
         || contract.seal_threshold() != group.capsule_threshold()
-        || contract.content().kind() != ContentKind::ExactArtifact
-        || contract.content().digest() != artifact_digest
-        || contract.content().size() != artifact_size
+        || contract.content().digest() != content_digest
+        || contract.content().size() != content_size
     {
         return Err(ChainError::InvalidContract);
     }

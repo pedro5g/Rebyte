@@ -7,7 +7,7 @@ Copyright (c) 2026 Pedro Martins (pedro5g)
 Rebyte protects the bytes and portable metadata of files reconstructed below a
 root directory selected by the local user. It also protects the authenticity
 of the publisher and the integrity of signed capsules presented to the CLI.
-Unsigned `ra1_`/`.rba` artifacts, semantic patches and legacy `rf1_` tokens
+Unsigned `ra1_`/`.rba` artifacts, standalone semantic patches and legacy `rf1_` tokens
 make no authenticity claim.
 
 Chain additionally protects encrypted `.rba` confidentiality from parties that
@@ -50,7 +50,7 @@ passphrase or attempt to open as an unlisted identity.
 5. Make each file replacement atomic and a multi-file operation recoverable.
 6. Reconstruct file content exactly and verify it after the final write.
 7. Produce deterministic RAP v1 bytes for identical inputs and options.
-8. Never represent an unsigned artifact or semantic patch as authenticated.
+8. Never represent an unsigned artifact or standalone semantic patch as authenticated.
 9. Bind every Chain identity to distinct signing and encryption public keys.
 10. Require every proposed member to prove its own private signing key before
     a group exists.
@@ -60,7 +60,7 @@ passphrase or attempt to open as an unlisted identity.
 
 ## Explicit non-goals
 
-- Confidentiality for RAP, unsigned artifacts or semantic patches.
+- Confidentiality for RAP, unsigned artifacts or standalone semantic patches.
 - DRM, prevention of ciphertext redistribution or forced deletion of plaintext
   already recovered by a Chain recipient.
 - Hiding Chain payload length, group membership, recipient count or public
@@ -76,7 +76,7 @@ passphrase or attempt to open as an unlisted identity.
 - Proving generated source code is safe to compile or execute.
 - Deleting files in RAP v1.
 - Authenticating the author, freshness or authorization of an unsigned
-  artifact or semantic patch.
+  artifact or standalone semantic patch outside a verified Chain envelope.
 
 ## Abuse cases required in tests
 

@@ -169,9 +169,11 @@ rebyte patch apply port-emergency.rbp.json \
   --target ./service.toml --yes --backup
 ```
 
-Use semantic patches only as local reviewed instructions. For authenticated
-distribution, apply the change in a controlled publisher workspace and package
-the resulting exact configuration in a signed capsule.
+Standalone semantic patches are local reviewed instructions. For confidential
+multi-party authorization, use `chain capsule create --patch`, collect the
+group threshold, finalize the `.rbe`, and let a listed recipient run
+`chain capsule patch --dry-run` before the atomic apply. The Access Contract
+binds the exact patch bytes and `applySemanticPatch` capability.
 
 ## Firmware or binary assets
 

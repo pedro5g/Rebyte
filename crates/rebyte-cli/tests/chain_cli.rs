@@ -294,6 +294,123 @@ fn consensus_capsule_reconstructs_directory_exactly() -> Result<(), Box<dyn std:
     );
     assert!(applied.join("empty").is_dir());
 
+    let patch = directory.path().join("emergency.patch.json");
+    let patch_target = directory.path().join("service.json");
+    let patch_proposal = directory.path().join("emergency.rbep");
+    let patch_approval = directory.path().join("emergency.rbca.json");
+    let patch_capsule = directory.path().join("emergency.rbe");
+    fs::write(
+        &patch_target,
+        br#"{"service":{"port":80,"name":"api"}}"#.as_slice(),
+    )?;
+    assert_success(
+        &rebyte()
+            .args([
+                "patch",
+                "create",
+                "--format",
+                "json",
+                "--operation",
+                "set:/service/port=8080",
+                "--output",
+                path_text(&patch)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "capsule",
+                "create",
+                "--group",
+                path_text(&group)?,
+                "--patch",
+                path_text(&patch)?,
+                "--recipient",
+                path_text(&public)?,
+                "--output",
+                path_text(&patch_proposal)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "capsule",
+                "approve",
+                path_text(&patch_proposal)?,
+                "--private-key",
+                path_text(&private)?,
+                "--passphrase-file",
+                path_text(&passphrase)?,
+                "--output",
+                path_text(&patch_approval)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "capsule",
+                "finalize",
+                path_text(&patch_proposal)?,
+                "--approval",
+                path_text(&patch_approval)?,
+                "--output",
+                path_text(&patch_capsule)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    let patch_preview = rebyte()
+        .args([
+            "chain",
+            "capsule",
+            "patch",
+            "--file",
+            path_text(&patch_capsule)?,
+            "--private-key",
+            path_text(&private)?,
+            "--passphrase-file",
+            path_text(&passphrase)?,
+            "--target",
+            path_text(&patch_target)?,
+            "--dry-run",
+            "--json",
+        ])
+        .output()?;
+    assert_success(&patch_preview);
+    assert!(stdout_text(&patch_preview).contains("\"authorization\": \"Chain contract"));
+    assert!(String::from_utf8(fs::read(&patch_target)?)?.contains("\"port\":80"));
+    let patch_apply = rebyte()
+        .args([
+            "chain",
+            "capsule",
+            "patch",
+            "--file",
+            path_text(&patch_capsule)?,
+            "--private-key",
+            path_text(&private)?,
+            "--passphrase-file",
+            path_text(&passphrase)?,
+            "--target",
+            path_text(&patch_target)?,
+            "--yes",
+            "--backup",
+            "--json",
+        ])
+        .output()?;
+    assert_success(&patch_apply);
+    assert!(stdout_text(&patch_apply).contains("\"applied\": true"));
+    assert!(String::from_utf8(fs::read(&patch_target)?)?.contains("8080"));
+    assert!(patch_target.with_extension("json.rebyte.bak").exists());
+
     assert_success(
         &rebyte()
             .args([

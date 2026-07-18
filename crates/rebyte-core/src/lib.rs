@@ -21,10 +21,11 @@ pub use rebyte_chain::{
     Capabilities, Capability, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError,
     ChainLimits, ContentCommitment, ContentKind, ContractError, ContractId,
     EncryptedIdentityDocument, GroupAcceptance, GroupCertificate, GroupId, GroupProposal,
-    IdentityId, IdentityPublicDocument, OpenedCapsule, PrincipalId, QuorumRelease, ReleasePolicy,
-    UnlockedIdentity, accept_group, approve_capsule, create_capsule_proposal,
-    create_capsule_proposal_with_contract, finalize_capsule, finalize_group, generate_identity,
-    open_capsule,
+    IdentityId, IdentityPublicDocument, OpenedCapsule, OpenedSemanticPatch, PrincipalId,
+    QuorumRelease, ReleasePolicy, UnlockedIdentity, accept_group, approve_capsule,
+    create_capsule_proposal, create_capsule_proposal_with_contract,
+    create_content_proposal_with_contract, create_semantic_patch_proposal, finalize_capsule,
+    finalize_group, generate_identity, open_capsule, open_semantic_patch,
 };
 pub use rebyte_diff::{
     ChangeKind, DiffEntry, DiffError, DiffReport, DiffSummary, DirectoryChangeKind,
