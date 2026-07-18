@@ -91,7 +91,7 @@ enum Commands {
     /// Inspect bounded capsule metadata; verification status is reported separately.
     Inspect(ReadCommand),
     /// Verify structure, publisher, signature and every reconstructed file.
-    Verify(ReadCommand),
+    Verify(VerifyCommand),
     /// Compare a verified capsule with a local root without writing.
     Diff(DiffCommand),
     /// Verify, preview and safely apply a capsule to a local root.
@@ -123,6 +123,15 @@ struct ReadCommand {
     /// Emit stable JSON instead of terminal text.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct VerifyCommand {
+    #[command(flatten)]
+    read: ReadCommand,
+    /// Report each verification stage in its enforced order.
+    #[arg(long)]
+    explain: bool,
 }
 
 #[derive(Debug, Args)]
@@ -283,18 +292,103 @@ fn inspect(command: &ReadCommand) -> Result<(), CliError> {
     }
 }
 
-fn verify(command: &ReadCommand) -> Result<(), CliError> {
-    let input = read_input(&command.input)?;
-    let policy = trust_policy(&command.trust);
-    let keyring = trusted_keyring(&command.trust)?;
+const EXPLAIN_STEPS: [&str; 5] = [
+    "input bound and token decoded",
+    "canonical header and manifest parsed within limits",
+    "capsule digest, trust policy and Ed25519 signature verified",
+    "payload decompressed and every file digest verified",
+    "fully verified capsule released",
+];
+
+fn verify(command: &VerifyCommand) -> Result<(), CliError> {
+    if command.explain {
+        return verify_explained(command);
+    }
+    let input = read_input(&command.read.input)?;
+    let policy = trust_policy(&command.read.trust);
+    let keyring = trusted_keyring(&command.read.trust)?;
     let verified = verify_capsule(input.as_capsule_input(), &policy, &keyring)
         .map_err(CliError::verification)?;
     let report = VerificationReport::from_capsule(&verified);
-    if command.json {
+    if command.read.json {
         write_json(&report)
     } else {
         print_verification(&report);
         Ok(())
+    }
+}
+
+fn verify_explained(command: &VerifyCommand) -> Result<(), CliError> {
+    let input = read_input(&command.read.input)?;
+    let policy = trust_policy(&command.read.trust);
+    let keyring = trusted_keyring(&command.read.trust)?;
+    let human = !command.read.json;
+    let mut passed: Vec<&'static str> = Vec::new();
+    if human {
+        println!("{}", ui::heading("Verification steps"));
+    }
+    let limits = SecurityLimits::V1;
+    let unverified = explain_step(
+        UnverifiedCapsule::from_input(input.as_capsule_input(), &limits),
+        EXPLAIN_STEPS[0],
+        &mut passed,
+        human,
+    )?;
+    let structural = explain_step(
+        unverified.decode(&limits),
+        EXPLAIN_STEPS[1],
+        &mut passed,
+        human,
+    )?;
+    let signature_verified = explain_step(
+        structural.verify_signature(&policy, &keyring),
+        EXPLAIN_STEPS[2],
+        &mut passed,
+        human,
+    )?;
+    let payload_verified = explain_step(
+        signature_verified.verify_payload(&limits),
+        EXPLAIN_STEPS[3],
+        &mut passed,
+        human,
+    )?;
+    let verified = payload_verified.finish();
+    record_step(EXPLAIN_STEPS[4], &mut passed, human);
+    let mut report = VerificationReport::from_capsule(&verified);
+    report.steps = Some(passed);
+    if command.read.json {
+        write_json(&report)
+    } else {
+        println!();
+        print_verification(&report);
+        Ok(())
+    }
+}
+
+fn explain_step<T>(
+    result: Result<T, VerificationError>,
+    name: &'static str,
+    passed: &mut Vec<&'static str>,
+    human: bool,
+) -> Result<T, CliError> {
+    match result {
+        Ok(value) => {
+            record_step(name, passed, human);
+            Ok(value)
+        }
+        Err(error) => {
+            if human {
+                println!("  ✗ {name}");
+            }
+            Err(CliError::verification(error))
+        }
+    }
+}
+
+fn record_step(name: &'static str, passed: &mut Vec<&'static str>, human: bool) {
+    passed.push(name);
+    if human {
+        println!("  ✓ {name}");
     }
 }
 
@@ -653,6 +747,8 @@ struct VerificationReport {
     capsule_digest: String,
     files: usize,
     reconstructed_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    steps: Option<Vec<&'static str>>,
 }
 
 impl VerificationReport {
@@ -666,6 +762,7 @@ impl VerificationReport {
             capsule_digest: encode_digest(&capsule.capsule_digest()),
             files: capsule.files().len(),
             reconstructed_bytes: capsule.header().uncompressed_payload_size,
+            steps: None,
         }
     }
 }
