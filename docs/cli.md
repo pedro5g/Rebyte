@@ -106,6 +106,8 @@ rebyte key inspect PUBLIC_KEY [--json]
 ```
 
 Validates the complete document and derived Key ID before displaying it.
+Output includes the fingerprint as sixteen pronounceable proquint words for
+out-of-band comparison; `key generate` prints the same words.
 
 ### `key status`
 
@@ -225,7 +227,47 @@ rebyte chain identity inspect IDENTITY.public.json [--json]
 
 Rejects unknown fields, reformatted non-canonical JSON, invalid Base64URL,
 malformed public keys, a changed encryption key or an invalid self-signature.
-The reported `Identity ID` commits both purpose-specific keys.
+The reported `Identity ID` commits both purpose-specific keys. Human and JSON
+output additionally show the identity fingerprint as sixteen pronounceable
+proquint words; compare the spoken words over an independent channel before
+trusting a received public package.
+
+### `chain identity backup`
+
+```text
+rebyte chain identity backup
+  --private-key IDENTITY.rbk [--passphrase-file PATH]
+  --share-count N --threshold T
+  --output-dir DIRECTORY [--json]
+```
+
+Unlocks the identity and splits both private seeds into `N` signed Shamir
+share documents with recovery threshold `T`, written exclusively as
+`identity-share-INDEX.json` with mode `0600` on Unix. Parameters must satisfy
+`2 <= T <= N <= 64`. Each share embeds and is signed by the public identity,
+so a trustee can verify authenticity and tampering fails closed.
+
+Any `T` distinct shares reconstruct the complete identity **without the
+passphrase**. Treat every share as secret key material: give each one to a
+different trustee, never store two together, and never place them in the same
+backup as the `.rbk`.
+
+### `chain identity restore`
+
+```text
+rebyte chain identity restore
+  --share SHARE.json [--share SHARE.json ...]
+  --private-key NEW.rbk --public-key NEW.public.json
+  [--passphrase-file PATH] [--json]
+```
+
+Requires exactly `T` distinct shares of one identity. Shares are read with the
+private-file policy, individually signature-checked, and rejected when mixed,
+duplicated, tampered or below the threshold. The reconstructed seeds are
+verified against the embedded public identity before a fresh `.rbk` is written
+under a new passphrase; the public package and `IdentityId` are unchanged.
+After a restore that followed share exposure, create a fresh backup and retire
+the old shares.
 
 ### `chain group create`
 

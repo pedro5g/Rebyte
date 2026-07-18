@@ -206,6 +206,28 @@ rebyte chain identity generate \
   --passphrase-file bob.passphrase
 ```
 
+Both commands print the identity fingerprint as sixteen pronounceable words;
+read them aloud over an independent channel before trusting a received public
+package. Threshold backup shares remove the single point of failure of one
+`.rbk` copy — any three of five trustees can restore the identity, fewer
+learn nothing:
+
+```console
+rebyte chain identity backup \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --share-count 5 --threshold 3 --output-dir ./alice-shares
+
+rebyte chain identity restore \
+  --share s1.json --share s3.json --share s5.json \
+  --private-key alice-restored.rbk \
+  --public-key alice-restored.public.json \
+  --passphrase-file alice-new.passphrase
+```
+
+Each share is signed, reconstructs the identity without a passphrase when the
+threshold is met, and must be guarded like a secret. The complete trustee
+ceremony is described in the [Chain operations runbook](docs/chain-operations.md).
+
 Form a two-member group. Formation is always unanimous, even when later
 capsules use a lower approval threshold:
 
@@ -374,7 +396,7 @@ use terminal-aware color; redirected output and `NO_COLOR` remain plain.
 | `pack` | Read a directory without following symlinks, sign and self-verify a capsule |
 | `hash` | Compute or check the RAP file-domain BLAKE3 digest |
 | `patch` | Create, inspect, preview and atomically apply JSON/TOML semantic patches |
-| `chain identity` | Generate or inspect a self-custodied signing/encryption identity |
+| `chain identity` | Generate, inspect, back up or restore a self-custodied identity |
 | `chain group` | Create, accept, finalize or inspect a consensus group |
 | `chain capsule` | Encrypt, approve, finalize, inspect or open a group capsule |
 | `chain release` | Request and satisfy threshold/time-gated content release |
@@ -767,6 +789,8 @@ benchmarks. Current measured targets and baselines are documented in
 
 - [Concepts and problem map](docs/concepts.md): what each Rebyte layer solves
   and how to choose it.
+- [Usage flows](docs/flows.md): every workflow as a diagram, from unsigned
+  artifacts to quorum release and identity recovery.
 - [System architecture](docs/architecture.md): components, trust ladder and
   complete data lifecycle.
 - [CLI reference](docs/cli.md): every command, flag, output and exit code.

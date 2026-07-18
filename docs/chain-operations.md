@@ -53,6 +53,41 @@ For every identity:
    issue trackers or ordinary logs;
 5. test recovery with a non-production capsule.
 
+## Threshold identity backup
+
+Losing every `.rbk` copy or the passphrase makes an identity unrecoverable.
+Shamir backup shares remove that single point of failure without creating a
+recovery authority:
+
+```console
+rebyte chain identity backup \
+  --private-key alice.rbk \
+  --passphrase-file alice.passphrase \
+  --share-count 5 --threshold 3 \
+  --output-dir ./alice-shares
+
+rebyte chain identity restore \
+  --share share-from-carol.json \
+  --share share-from-dan.json \
+  --share share-from-erin.json \
+  --private-key alice-restored.rbk \
+  --public-key alice-restored.public.json \
+  --passphrase-file alice-new.passphrase
+```
+
+Rules for a real ceremony:
+
+1. any `threshold` shares reconstruct the identity **without a passphrase**;
+   hand each share to a different trustee over a verified channel and never
+   store two shares in one place;
+2. trustees verify the embedded identity ID and fingerprint words against the
+   owner before accepting custody;
+3. choose `threshold >= 2` so no single trustee holds the identity, and
+   `share-count` high enough to survive losing trustees;
+4. after any restore, or when a share may have been exposed, immediately
+   create a fresh backup — old shares remain able to meet the old threshold;
+5. rehearse the restore with a non-production identity before relying on it.
+
 ## Group formation
 
 The coordinator creates one canonical proposal:
