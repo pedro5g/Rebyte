@@ -65,7 +65,7 @@ passphrase or attempt to open as an unlisted identity.
   already recovered by a Chain recipient.
 - Hiding Chain payload length, group membership, recipient count or public
   identity metadata.
-- Fresh `T-of-N` cooperation for every Chain open; envelope v1 uses the
+- Fresh `T-of-N` cooperation for every Chain open; envelope v2 direct release uses the
   threshold to authorize finalization and then permits each listed recipient
   to open independently.
 - Global atomicity across multiple files or filesystems.

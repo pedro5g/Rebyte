@@ -9,6 +9,7 @@ members = [
     "crates/rebyte-file-token",
     "crates/rebyte-artifact-token",
     "crates/rebyte-semantic",
+    "crates/rebyte-contract",
     "crates/rebyte-chain",
     "crates/rebyte-signature",
     "crates/rebyte-pack",

@@ -11,8 +11,12 @@ and releases follow Semantic Versioning.
   HPKE keys in passphrase-encrypted `.rbk` bundles.
 - Unanimous group formation certificates and configurable `T-of-N` capsule
   approval policies bound to every original public identity.
-- Canonical `.rbe` and `rbe1_` encrypted capsules with one authenticated
+- Canonical `.rbe` and `rbe2_` encrypted capsules with one authenticated
   payload and RFC 9180 HPKE content-key slots for multiple recipients.
+- Canonical `rc1_` Access Contracts binding controllers, thresholds,
+  recipients, capabilities, exact content and direct or quorum key release.
+- Fail-closed Chain v2 contract integration; unsupported quorum, temporal and
+  maximum-release policies cannot degrade into local clock/counter checks.
 - Complete `rebyte chain identity`, `chain group` and `chain capsule` CLI
   workflows, stable JSON reports and byte-exact file/directory integration
   coverage.
@@ -28,9 +32,10 @@ and releases follow Semantic Versioning.
 
 ### Documentation
 
-- Specify the implemented Chain v1 wire format, security boundary, CLI, Rust
-  API and multi-party flow diagrams; retain threshold opening and the signed
-  Merkle event history as explicit roadmap layers.
+- Specify the implemented Chain v2 and Access Contract v1 wire formats,
+  security boundary, CLI, Rust API, modular layer diagram and multi-party flow;
+  retain quorum release and the signed Merkle event history as explicit
+  roadmap layers.
 
 ## [1.2.0] - 2026-07-17
 

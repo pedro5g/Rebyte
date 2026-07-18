@@ -10,6 +10,10 @@ use hpke::{
     Deserializable as _, OpModeR, OpModeS, Serializable as _, single_shot_open, single_shot_seal,
 };
 use rebyte_artifact_token::decode_artifact;
+use rebyte_contract::{
+    AccessContract, Capabilities, Capability, ContentCommitment, ContentKind, ContractError,
+    PrincipalId, ReleasePolicy,
+};
 use rebyte_format::SecurityLimits;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -24,18 +28,19 @@ use crate::{
 };
 
 /// Text prefix for Base64URL-encoded encrypted capsule envelopes.
-pub const CAPSULE_TOKEN_PREFIX: &str = "rbe1_";
+pub const CAPSULE_TOKEN_PREFIX: &str = "rbe2_";
 
 const PROPOSAL_MAGIC: &[u8; 4] = b"RBEP";
 const ENVELOPE_MAGIC: &[u8; 4] = b"RBEE";
-const WIRE_VERSION: u16 = 1;
+const WIRE_VERSION: u16 = 2;
 const CRYPTO_SUITE: u16 = 1;
 const APPROVAL_VERSION: u16 = 1;
 const APPROVAL_KIND: &str = "rebyte-chain-capsule-approval";
-const PAYLOAD_AAD_DOMAIN: &[u8] = b"rebyte chain payload aad v1\0";
-const HPKE_INFO_DOMAIN: &[u8] = b"rebyte chain hpke cek slot v1\0";
-const APPROVAL_DOMAIN: &[u8] = b"rebyte chain capsule approval v1\0";
+const PAYLOAD_AAD_DOMAIN: &[u8] = b"rebyte chain payload aad v2\0";
+const HPKE_INFO_DOMAIN: &[u8] = b"rebyte chain hpke cek slot v2\0";
+const APPROVAL_DOMAIN: &[u8] = b"rebyte chain capsule approval v2\0";
 const MAX_GROUP_DOCUMENT_BYTES: usize = 1_024 * 1_024;
+const MAX_ACCESS_CONTRACT_BYTES: usize = 16 * 1_024;
 const MAX_IDENTITY_DOCUMENT_BYTES: usize = 64 * 1_024;
 const MAX_RECIPIENTS: usize = 64;
 const HPKE_ENCAPPED_KEY_BYTES: usize = 32;
@@ -52,7 +57,7 @@ pub struct ChainLimits {
     pub artifact: SecurityLimits,
     /// Maximum binary `.rbe` or proposal size.
     pub max_envelope_bytes: u64,
-    /// Maximum textual `rbe1_` token size.
+    /// Maximum textual `rbe2_` token size.
     pub max_token_bytes: u64,
 }
 
@@ -82,6 +87,7 @@ struct RecipientSlot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapsuleProposal {
     group: GroupCertificate,
+    contract: AccessContract,
     proposal_nonce: [u8; 32],
     artifact_digest: [u8; 32],
     artifact_size: u64,
@@ -112,6 +118,9 @@ impl CapsuleProposal {
         }
         let group_bytes = reader.bytes_u32(MAX_GROUP_DOCUMENT_BYTES)?;
         let group = GroupCertificate::from_json(&group_bytes)?;
+        let contract_bytes = reader.bytes_u32(MAX_ACCESS_CONTRACT_BYTES)?;
+        let contract =
+            AccessContract::from_bytes(&contract_bytes).map_err(|_| ChainError::InvalidContract)?;
         let proposal_nonce = reader.array()?;
         let artifact_digest = reader.array()?;
         let artifact_size = reader.u64()?;
@@ -139,6 +148,7 @@ impl CapsuleProposal {
         reader.finish()?;
         let proposal = Self {
             group,
+            contract,
             proposal_nonce,
             artifact_digest,
             artifact_size,
@@ -171,6 +181,13 @@ impl CapsuleProposal {
         put_u16(&mut output, WIRE_VERSION);
         put_u16(&mut output, CRYPTO_SUITE);
         put_bytes_u32(&mut output, &group_bytes)?;
+        put_bytes_u32(
+            &mut output,
+            &self
+                .contract
+                .to_bytes()
+                .map_err(|_| ChainError::InvalidContract)?,
+        )?;
         output.extend_from_slice(&self.proposal_nonce);
         output.extend_from_slice(&self.artifact_digest);
         put_u64(&mut output, self.artifact_size);
@@ -194,6 +211,12 @@ impl CapsuleProposal {
     #[must_use]
     pub const fn group(&self) -> &GroupCertificate {
         &self.group
+    }
+
+    /// Returns the canonical access contract approved by the group.
+    #[must_use]
+    pub const fn contract(&self) -> &AccessContract {
+        &self.contract
     }
 
     /// Returns the proposal fingerprint signed by every approval.
@@ -248,6 +271,17 @@ impl CapsuleProposal {
             }
             previous = Some(identity_id);
         }
+        validate_contract_bindings(
+            &self.group,
+            &self.contract,
+            &self.artifact_digest,
+            self.artifact_size,
+            &self
+                .slots
+                .iter()
+                .map(|slot| slot.recipient.identity_id())
+                .collect::<Result<Vec<_>, _>>()?,
+        )?;
         if calculate_proposal_id(self)? != self.proposal_id {
             return Err(ChainError::BindingMismatch);
         }
@@ -375,7 +409,7 @@ impl CapsuleEnvelope {
         Ok(envelope)
     }
 
-    /// Decodes and verifies a strict `rbe1_` Base64URL token.
+    /// Decodes and verifies a strict `rbe2_` Base64URL token.
     ///
     /// # Errors
     ///
@@ -478,6 +512,7 @@ impl CapsuleEnvelope {
 #[derive(Clone)]
 pub struct OpenedCapsule {
     artifact_binary: Vec<u8>,
+    contract_id: rebyte_contract::ContractId,
     group_id: GroupId,
     proposal_id: [u8; 32],
     recipient_id: IdentityId,
@@ -489,6 +524,7 @@ impl core::fmt::Debug for OpenedCapsule {
             .debug_struct("OpenedCapsule")
             .field("artifact_binary", &"[REDACTED]")
             .field("artifact_bytes", &self.artifact_binary.len())
+            .field("contract_id", &self.contract_id)
             .field("group_id", &self.group_id)
             .field("proposal_id", &self.proposal_id)
             .field("recipient_id", &self.recipient_id)
@@ -507,6 +543,12 @@ impl OpenedCapsule {
     #[must_use]
     pub fn into_artifact_binary(self) -> Vec<u8> {
         self.artifact_binary
+    }
+
+    /// Returns the exact access contract that authorized decryption.
+    #[must_use]
+    pub const fn contract_id(&self) -> rebyte_contract::ContractId {
+        self.contract_id
     }
 
     /// Returns the authorizing group.
@@ -538,24 +580,86 @@ impl OpenedCapsule {
 pub fn create_capsule_proposal(
     group: GroupCertificate,
     artifact_binary: &[u8],
-    mut recipients: Vec<IdentityPublicDocument>,
+    recipients: Vec<IdentityPublicDocument>,
     limits: &ChainLimits,
 ) -> Result<CapsuleProposal, ChainError> {
     group.validate()?;
     enforce_length(artifact_binary.len(), limits.artifact.max_capsule_bytes)?;
     decode_artifact(artifact_binary, &limits.artifact).map_err(|_| ChainError::InvalidArtifact)?;
+    let recipients = canonical_recipients(recipients)?;
+    let artifact_digest = artifact_digest(artifact_binary);
+    let artifact_size =
+        u64::try_from(artifact_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
+    let group_id = group.group_id()?;
+    let controllers = group
+        .proposal()
+        .members()
+        .iter()
+        .map(IdentityPublicDocument::identity_id)
+        .map(|result| result.map(principal_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let recipient_ids = recipients
+        .iter()
+        .map(IdentityPublicDocument::identity_id)
+        .map(|result| result.map(principal_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let contract = AccessContract::builder(
+        PrincipalId::from_bytes(*group_id.as_bytes()),
+        ContentCommitment::new(ContentKind::ExactArtifact, artifact_digest, artifact_size),
+    )
+    .controllers(controllers, group.capsule_threshold())
+    .recipients(recipient_ids)
+    .capabilities(Capabilities::APPLY_EXACT)
+    .release(ReleasePolicy::DirectRecipients)
+    .build()
+    .map_err(map_contract_error)?;
+    create_capsule_proposal_with_contract(group, artifact_binary, recipients, contract, limits)
+}
+
+/// Encrypts one verified `.rba` under an explicit canonical access contract.
+///
+/// The current envelope implements only direct HPKE recipient release. Quorum,
+/// time and usage policies are rejected until their key-share authorization
+/// protocol is available; they are never silently weakened to local checks.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] if the contract does not exactly bind the group,
+/// content, recipients and sealing threshold, or requests an unsupported
+/// release mechanism.
+pub fn create_capsule_proposal_with_contract(
+    group: GroupCertificate,
+    artifact_binary: &[u8],
+    recipients: Vec<IdentityPublicDocument>,
+    contract: AccessContract,
+    limits: &ChainLimits,
+) -> Result<CapsuleProposal, ChainError> {
+    group.validate()?;
+    enforce_length(artifact_binary.len(), limits.artifact.max_capsule_bytes)?;
+    decode_artifact(artifact_binary, &limits.artifact).map_err(|_| ChainError::InvalidArtifact)?;
+    let recipients = canonical_recipients(recipients)?;
+    let artifact_digest = artifact_digest(artifact_binary);
+    let artifact_size =
+        u64::try_from(artifact_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
+    let recipient_ids: Vec<_> = recipients
+        .iter()
+        .map(IdentityPublicDocument::identity_id)
+        .collect::<Result<_, _>>()?;
+    validate_contract_bindings(
+        &group,
+        &contract,
+        &artifact_digest,
+        artifact_size,
+        &recipient_ids,
+    )?;
+
+    if !matches!(contract.release(), ReleasePolicy::DirectRecipients) {
+        return Err(ChainError::UnsupportedReleasePolicy);
+    }
+
+    let group_id = group.group_id()?;
     if recipients.is_empty() || recipients.len() > MAX_RECIPIENTS {
         return Err(ChainError::LimitExceeded);
-    }
-    for recipient in &recipients {
-        recipient.validate()?;
-    }
-    recipients.sort_by_key(|recipient| recipient.identity_id().unwrap_or(IdentityId([0; 32])));
-    if recipients.windows(2).any(|pair| {
-        pair.first().and_then(|item| item.identity_id().ok())
-            == pair.get(1).and_then(|item| item.identity_id().ok())
-    }) {
-        return Err(ChainError::DuplicateIdentity);
     }
 
     let mut cek = Zeroizing::new([0_u8; CEK_BYTES]);
@@ -564,23 +668,8 @@ pub fn create_capsule_proposal(
     getrandom::fill(cek.as_mut()).map_err(|_| ChainError::EntropyUnavailable)?;
     getrandom::fill(&mut proposal_nonce).map_err(|_| ChainError::EntropyUnavailable)?;
     getrandom::fill(&mut payload_nonce).map_err(|_| ChainError::EntropyUnavailable)?;
-    let artifact_digest = artifact_digest(artifact_binary);
-    let artifact_size =
-        u64::try_from(artifact_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
-    let recipient_ids: Vec<_> = recipients
-        .iter()
-        .map(IdentityPublicDocument::identity_id)
-        .collect::<Result<_, _>>()?;
-    let group_id = group.group_id()?;
-    let core = proposal_core(
-        &group,
-        &proposal_nonce,
-        &artifact_digest,
-        artifact_size,
-        &payload_nonce,
-        &recipient_ids,
-    )?;
-    let core_digest = domain_hash("Rebyte Chain proposal core digest v1 2026-07-17", &[&core]);
+    let core = proposal_core(&group, &contract, &proposal_nonce, &payload_nonce)?;
+    let core_digest = domain_hash("Rebyte Chain proposal core digest v2 2026-07-18", &[&core]);
     let payload_cipher = XChaCha20Poly1305::new_from_slice(cek.as_ref())
         .map_err(|_| ChainError::CryptographicFailure)?;
     let ciphertext = payload_cipher
@@ -623,6 +712,7 @@ pub fn create_capsule_proposal(
     }
     let mut proposal = CapsuleProposal {
         group,
+        contract,
         proposal_nonce,
         artifact_digest,
         artifact_size,
@@ -715,6 +805,20 @@ pub fn open_capsule(
     limits: &ChainLimits,
 ) -> Result<OpenedCapsule, ChainError> {
     envelope.validate(limits)?;
+    if !matches!(
+        envelope.proposal.contract.release(),
+        ReleasePolicy::DirectRecipients
+    ) {
+        return Err(ChainError::UnsupportedReleasePolicy);
+    }
+    if !envelope
+        .proposal
+        .contract
+        .capabilities()
+        .contains(Capability::Decrypt)
+    {
+        return Err(ChainError::InvalidContract);
+    }
     let recipient_id = recipient.identity_id();
     let slot = envelope
         .proposal
@@ -727,21 +831,13 @@ pub fn open_capsule(
         })
         .ok_or(ChainError::NotRecipient)?;
     let group_id = envelope.proposal.group.group_id()?;
-    let recipient_ids: Vec<_> = envelope
-        .proposal
-        .slots
-        .iter()
-        .map(|slot| slot.recipient.identity_id())
-        .collect::<Result<_, _>>()?;
     let core = proposal_core(
         &envelope.proposal.group,
+        &envelope.proposal.contract,
         &envelope.proposal.proposal_nonce,
-        &envelope.proposal.artifact_digest,
-        envelope.proposal.artifact_size,
         &envelope.proposal.payload_nonce,
-        &recipient_ids,
     )?;
-    let core_digest = domain_hash("Rebyte Chain proposal core digest v1 2026-07-17", &[&core]);
+    let core_digest = domain_hash("Rebyte Chain proposal core digest v2 2026-07-18", &[&core]);
     let encapped_key = <ChainKem as hpke::Kem>::EncappedKey::from_bytes(&slot.encapped_key)
         .map_err(|_| ChainError::CryptographicFailure)?;
     let info = hpke_info(&group_id, &envelope.proposal.proposal_nonce, &recipient_id);
@@ -779,6 +875,7 @@ pub fn open_capsule(
     decode_artifact(&artifact_binary, &limits.artifact).map_err(|_| ChainError::InvalidArtifact)?;
     Ok(OpenedCapsule {
         artifact_binary,
+        contract_id: envelope.proposal.contract.contract_id(),
         group_id,
         proposal_id: envelope.proposal.proposal_id,
         recipient_id,
@@ -814,50 +911,36 @@ fn verify_capsule_approval(
 
 fn proposal_core(
     group: &GroupCertificate,
+    contract: &AccessContract,
     proposal_nonce: &[u8; 32],
-    artifact_digest: &[u8; 32],
-    artifact_size: u64,
     payload_nonce: &[u8; PAYLOAD_NONCE_BYTES],
-    recipient_ids: &[IdentityId],
 ) -> Result<Vec<u8>, ChainError> {
     let group_id = group.group_id()?;
     let group_digest = domain_hash(
-        "Rebyte Chain group certificate digest v1 2026-07-17",
+        "Rebyte Chain group certificate digest v2 2026-07-18",
         &[&group.to_json()?],
     );
+    let contract_bytes = contract
+        .to_bytes()
+        .map_err(|_| ChainError::InvalidContract)?;
     let mut core = Vec::new();
-    core.extend_from_slice(b"rebyte chain capsule proposal core v1\0");
+    core.extend_from_slice(b"rebyte chain capsule proposal core v2\0");
     put_u16(&mut core, WIRE_VERSION);
     put_u16(&mut core, CRYPTO_SUITE);
     core.extend_from_slice(group_id.as_bytes());
     core.extend_from_slice(&group_digest);
+    put_bytes_u32(&mut core, &contract_bytes)?;
     core.extend_from_slice(proposal_nonce);
-    core.extend_from_slice(artifact_digest);
-    put_u64(&mut core, artifact_size);
     core.extend_from_slice(payload_nonce);
-    put_u16(
-        &mut core,
-        u16::try_from(recipient_ids.len()).map_err(|_| ChainError::LengthOverflow)?,
-    );
-    for recipient_id in recipient_ids {
-        core.extend_from_slice(recipient_id.as_bytes());
-    }
     Ok(core)
 }
 
 fn calculate_proposal_id(proposal: &CapsuleProposal) -> Result<[u8; 32], ChainError> {
-    let recipient_ids: Vec<_> = proposal
-        .slots
-        .iter()
-        .map(|slot| slot.recipient.identity_id())
-        .collect::<Result<_, _>>()?;
     let core = proposal_core(
         &proposal.group,
+        &proposal.contract,
         &proposal.proposal_nonce,
-        &proposal.artifact_digest,
-        proposal.artifact_size,
         &proposal.payload_nonce,
-        &recipient_ids,
     )?;
     let mut slots = Vec::new();
     for slot in &proposal.slots {
@@ -866,11 +949,11 @@ fn calculate_proposal_id(proposal: &CapsuleProposal) -> Result<[u8; 32], ChainEr
         slots.extend_from_slice(&slot.wrapped_cek);
     }
     let ciphertext_digest = domain_hash(
-        "Rebyte Chain ciphertext digest v1 2026-07-17",
+        "Rebyte Chain ciphertext digest v2 2026-07-18",
         &[&proposal.ciphertext],
     );
     Ok(domain_hash(
-        "Rebyte Chain capsule proposal id v1 2026-07-17",
+        "Rebyte Chain capsule proposal id v2 2026-07-18",
         &[&core, &slots, &ciphertext_digest],
     ))
 }
@@ -885,14 +968,14 @@ fn calculate_envelope_id(
         approval_bytes.extend_from_slice(&decode_array::<64>(&approval.signature)?);
     }
     Ok(domain_hash(
-        "Rebyte Chain capsule envelope id v1 2026-07-17",
+        "Rebyte Chain capsule envelope id v2 2026-07-18",
         &[&proposal.proposal_id, &approval_bytes],
     ))
 }
 
 fn artifact_digest(artifact_binary: &[u8]) -> [u8; 32] {
     domain_hash(
-        "Rebyte Chain embedded artifact digest v1 2026-07-17",
+        "Rebyte Chain embedded artifact digest v2 2026-07-18",
         &[artifact_binary],
     )
 }
@@ -920,6 +1003,83 @@ fn approval_message(group_id: &GroupId, proposal_id: &[u8; 32], member_id: &Iden
     message.extend_from_slice(proposal_id);
     message.extend_from_slice(member_id.as_bytes());
     message
+}
+
+fn canonical_recipients(
+    mut recipients: Vec<IdentityPublicDocument>,
+) -> Result<Vec<IdentityPublicDocument>, ChainError> {
+    if recipients.is_empty() || recipients.len() > MAX_RECIPIENTS {
+        return Err(ChainError::LimitExceeded);
+    }
+    for recipient in &recipients {
+        recipient.validate()?;
+    }
+    recipients.sort_by_key(|recipient| recipient.identity_id().unwrap_or(IdentityId([0; 32])));
+    if recipients.windows(2).any(|pair| {
+        pair.first().and_then(|item| item.identity_id().ok())
+            == pair.get(1).and_then(|item| item.identity_id().ok())
+    }) {
+        return Err(ChainError::DuplicateIdentity);
+    }
+    Ok(recipients)
+}
+
+fn validate_contract_bindings(
+    group: &GroupCertificate,
+    contract: &AccessContract,
+    artifact_digest: &[u8; 32],
+    artifact_size: u64,
+    recipient_ids: &[IdentityId],
+) -> Result<(), ChainError> {
+    let contract_bytes = contract
+        .to_bytes()
+        .map_err(|_| ChainError::InvalidContract)?;
+    if contract_bytes.len() > MAX_ACCESS_CONTRACT_BYTES {
+        return Err(ChainError::LimitExceeded);
+    }
+    let group_id = group.group_id()?;
+    if contract.group_id() != PrincipalId::from_bytes(*group_id.as_bytes())
+        || contract.seal_threshold() != group.capsule_threshold()
+        || contract.content().kind() != ContentKind::ExactArtifact
+        || contract.content().digest() != artifact_digest
+        || contract.content().size() != artifact_size
+    {
+        return Err(ChainError::InvalidContract);
+    }
+    let controllers = group
+        .proposal()
+        .members()
+        .iter()
+        .map(IdentityPublicDocument::identity_id)
+        .map(|result| result.map(principal_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let recipients = recipient_ids
+        .iter()
+        .copied()
+        .map(principal_id)
+        .collect::<Vec<_>>();
+    if contract.controllers() != controllers
+        || contract.recipients() != recipients
+        || !contract.capabilities().contains(Capability::Decrypt)
+    {
+        return Err(ChainError::InvalidContract);
+    }
+    if !matches!(contract.release(), ReleasePolicy::DirectRecipients) {
+        return Err(ChainError::UnsupportedReleasePolicy);
+    }
+    Ok(())
+}
+
+const fn principal_id(identity_id: IdentityId) -> PrincipalId {
+    PrincipalId::from_bytes(*identity_id.as_bytes())
+}
+
+const fn map_contract_error(error: ContractError) -> ChainError {
+    match error {
+        ContractError::EntropyUnavailable => ChainError::EntropyUnavailable,
+        ContractError::LimitExceeded | ContractError::LengthOverflow => ChainError::LimitExceeded,
+        _ => ChainError::InvalidContract,
+    }
 }
 
 fn enforce_length(length: usize, maximum: u64) -> Result<(), ChainError> {

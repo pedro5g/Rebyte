@@ -1106,6 +1106,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hpke",
  "rebyte-artifact-token",
+ "rebyte-contract",
  "rebyte-format",
  "serde",
  "serde_json",
@@ -1157,6 +1158,15 @@ dependencies = [
  "rebyte-format",
  "ruzstd",
  "zstd",
+]
+
+[[package]]
+name = "rebyte-contract"
+version = "1.2.0"
+dependencies = [
+ "base64",
+ "blake3",
+ "getrandom 0.4.3",
 ]
 
 [[package]]

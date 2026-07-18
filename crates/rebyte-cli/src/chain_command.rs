@@ -10,9 +10,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::{Args, Subcommand};
 use rebyte_chain::{
-    CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError, ChainLimits,
+    Capability, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError, ChainLimits,
     EncryptedIdentityDocument, GroupAcceptance, GroupCertificate, GroupProposal,
-    IdentityPublicDocument, UnlockedIdentity, accept_group, approve_capsule,
+    IdentityPublicDocument, ReleasePolicy, UnlockedIdentity, accept_group, approve_capsule,
     create_capsule_proposal, finalize_capsule, finalize_group, generate_identity, open_capsule,
 };
 use rebyte_core::decode_artifact_file;
@@ -228,7 +228,7 @@ struct CapsuleFinalizeCommand {
     /// New binary `.rbe` encrypted capsule.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
-    /// Also print the equivalent `rbe1_` token.
+    /// Also print the equivalent `rbe2_` token.
     #[arg(long)]
     print_token: bool,
     /// Emit stable JSON; cannot be combined with `--print-token`.
@@ -274,7 +274,7 @@ struct PrivateIdentityArgs {
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 struct CapsuleInputArgs {
-    /// Inline `rbe1_` capsule token.
+    /// Inline `rbe2_` capsule token.
     #[arg(value_name = "TOKEN", conflicts_with = "file")]
     token: Option<String>,
     /// Binary `.rbe` capsule file.
@@ -702,7 +702,8 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
         )?;
     }
     let report = OpenReport {
-        schema_version: 1,
+        schema_version: 2,
+        contract_id: opened.contract_id().to_base64(),
         group_id: opened.group_id().to_base64(),
         proposal_id: encode(opened.proposal_id()),
         recipient_id: opened.recipient_id().to_base64(),
@@ -714,6 +715,7 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
         write_json(&report)
     } else {
         println!("{}", super::ui::success("✓ Consensus capsule opened"));
+        println!("  Contract     {}", report.contract_id);
         println!("  Group ID     {}", report.group_id);
         println!("  Proposal ID  {}", report.proposal_id);
         println!("  Recipient    {}", report.recipient_id);
@@ -821,7 +823,9 @@ fn chain_error(error: ChainError) -> CliError {
         | ChainError::InvalidThreshold
         | ChainError::AuthenticationFailed
         | ChainError::IdentityMismatch
-        | ChainError::BindingMismatch => EXIT_POLICY,
+        | ChainError::BindingMismatch
+        | ChainError::InvalidContract
+        | ChainError::UnsupportedReleasePolicy => EXIT_POLICY,
         _ => EXIT_MALFORMED,
     };
     CliError::new(exit_code, error.to_string())
@@ -957,10 +961,13 @@ struct CapsuleRecipientReport {
 #[serde(rename_all = "camelCase")]
 struct CapsuleReport {
     schema_version: u16,
+    contract_id: String,
     group_id: String,
     proposal_id: String,
     artifact_digest: String,
     artifact_bytes: u64,
+    capabilities: Vec<&'static str>,
+    release_policy: &'static str,
     recipients: Vec<CapsuleRecipientReport>,
     recipient_count: usize,
     required_approvals: u16,
@@ -987,7 +994,8 @@ impl CapsuleReport {
             })
             .collect::<Result<Vec<_>, CliError>>()?;
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
+            contract_id: proposal.contract().contract_id().to_base64(),
             group_id: proposal
                 .group()
                 .group_id()
@@ -996,6 +1004,12 @@ impl CapsuleReport {
             proposal_id: encode(proposal.proposal_id()),
             artifact_digest: encode(proposal.artifact_digest()),
             artifact_bytes: proposal.artifact_size(),
+            capabilities: capability_names(proposal),
+            release_policy: match proposal.contract().release() {
+                ReleasePolicy::DirectRecipients => "directRecipients",
+                ReleasePolicy::Quorum(_) => "quorum",
+                _ => "unknown",
+            },
             recipient_count: recipients.len(),
             recipients,
             required_approvals: proposal.group().capsule_threshold(),
@@ -1016,9 +1030,12 @@ impl CapsuleReport {
 }
 
 fn print_capsule_report(report: &CapsuleReport) {
+    println!("  Contract      {}", report.contract_id);
     println!("  Group ID      {}", report.group_id);
     println!("  Proposal ID   {}", report.proposal_id);
     println!("  Artifact      {} bytes", report.artifact_bytes);
+    println!("  Release       {}", report.release_policy);
+    println!("  Capabilities  {}", report.capabilities.join(", "));
     println!(
         "  Approvals     {} of {} required",
         report.approvals, report.required_approvals
@@ -1033,10 +1050,26 @@ fn print_capsule_report(report: &CapsuleReport) {
 #[serde(rename_all = "camelCase")]
 struct OpenReport {
     schema_version: u16,
+    contract_id: String,
     group_id: String,
     proposal_id: String,
     recipient_id: String,
     artifact_bytes: usize,
     raw_artifact: bool,
     output: String,
+}
+
+fn capability_names(proposal: &CapsuleProposal) -> Vec<&'static str> {
+    let capabilities = proposal.contract().capabilities();
+    [
+        (Capability::InspectMetadata, "inspectMetadata"),
+        (Capability::Decrypt, "decrypt"),
+        (Capability::Reconstruct, "reconstruct"),
+        (Capability::Diff, "diff"),
+        (Capability::Apply, "apply"),
+        (Capability::ApplySemanticPatch, "applySemanticPatch"),
+    ]
+    .into_iter()
+    .filter_map(|(capability, name)| capabilities.contains(capability).then_some(name))
+    .collect()
 }

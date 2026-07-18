@@ -1,8 +1,10 @@
 # Rebyte Chain architecture
 
-Status: Chain envelope v1 is implemented by `rebyte-chain`, `rebyte-core` and
-the `rebyte chain` CLI. The later signed event graph and interactive threshold
-opening described as roadmap are not implemented by envelope v1.
+Status: Chain envelope v2 and Access Contract v1 are implemented by
+`rebyte-contract`, `rebyte-chain`, `rebyte-core` and the `rebyte chain` CLI.
+Direct recipient release is functional. The later signed event graph and
+interactive quorum release described as roadmap are not implemented by
+envelope v2.
 
 Rebyte Chain is a local-first, self-custodied system for sharing byte-exact
 Rebyte artifacts with explicit cryptographic authorization and recipients. The
@@ -24,19 +26,21 @@ event log cannot prove that a remote recipient deleted plaintext.
 
 ## Product boundary
 
-Chain envelope v1 provides:
+Chain envelope v2 provides:
 
 - any number of independent self-custodied identities;
 - passphrase-encrypted portable `.rbk` private bundles;
 - self-signed public packages binding Ed25519 and X25519 keys;
 - unanimous `N-of-N` group formation proof;
 - configurable `T-of-N` authorization of each exact encrypted proposal;
+- an immutable contract binding group, threshold, recipients, capabilities,
+  plaintext digest/size and content-key release mechanism;
 - one ciphertext shared with one or many explicitly listed recipients;
 - the existing byte-exact `.rba` file or directory artifact as content;
-- canonical binary `.rbe`, textual `rbe1_` and strict control documents;
+- canonical binary `.rbe`, textual `rbe2_` and strict control documents;
 - native Rust and CLI APIs with no network dependency.
 
-Envelope v1 does not provide:
+Envelope v2 does not provide:
 
 - proof of work, mining, tokens or a globally replicated ledger;
 - a trusted global timestamp or total ordering of offline events;
@@ -52,6 +56,41 @@ Envelope v1 does not provide:
 Semantic patches remain a separate, signed content type. They can later be
 carried inside a Chain envelope without giving the patch language authority to
 execute code.
+
+## Modular security layers
+
+Applications select the lowest layer that supplies the property they need.
+Higher layers contain or bind lower-layer canonical bytes; they do not change
+what a digest, signature or encryption primitive means.
+
+```mermaid
+flowchart TB
+    S[File or portable directory]
+    A[Artifact layer<br/>ra1_ / .rba<br/>compression + exact integrity]
+    P[Publisher layer<br/>rb1_ / .rbc<br/>Ed25519 authenticity + trust policy]
+    C[Chain v2 direct release<br/>rbe2_ / .rbe<br/>group consensus + confidentiality]
+    Q[Quorum release<br/>fresh witnesses + trusted time/state<br/>specified, not implemented]
+
+    S --> A
+    A --> P
+    A --> C
+    P -. future content binding .-> C
+    C --> Q
+```
+
+| Requirement | Artifact | Signed RAP | Chain direct | Quorum release |
+|---|:---:|:---:|:---:|:---:|
+| Byte-exact reconstruction | yes | yes | yes | yes |
+| Corruption detection | yes | yes | yes | yes |
+| Publisher authenticity | no | yes | group approval | group approval |
+| Confidentiality | no | no | listed recipients | released session |
+| Open only after a date | no | no | no | witness-enforced |
+| At most one key release | no | no | no | stateful witnesses |
+| Force deletion after reading | no | no | no | no on an untrusted endpoint |
+
+The final row is a hard boundary: software cannot revoke bytes that an
+authorized, hostile endpoint has already copied. Trusted hardware can narrow
+that boundary only while every plaintext use remains inside the hardware.
 
 ## Terminology and object model
 
@@ -97,6 +136,7 @@ An `.rbe` Rebyte Encrypted Envelope contains:
 
 - fixed magic, protocol version, suite identifiers and strict limits;
 - the complete unanimously accepted group certificate;
+- the canonical Access Contract and its domain-separated `ContractId`;
 - the digest and length of one canonical inner `.rba` artifact;
 - one HPKE slot per explicitly authorized recipient;
 - one XChaCha20-Poly1305 ciphertext of the complete `.rba`;
@@ -121,7 +161,7 @@ plaintext in an interactive oracle.
 
 ## Group authorization and recipient access
 
-Chain envelope v1 has two intentionally independent sets:
+Chain envelope v2 has three intentionally independent sets:
 
 ```text
 Group {
@@ -131,6 +171,12 @@ Group {
 
 Recipients {
     identities: sorted unique public identities
+}
+
+Contract {
+    exact_content_commitment
+    capabilities
+    release_policy
 }
 ```
 
@@ -153,7 +199,7 @@ authorize encrypted delivery to ten customer identities.
 If a product requires `T-of-N` cooperation at every open, the CEK must instead
 be split by a reviewed threshold secret-sharing construction and exchanged in
 a fresh, replay-resistant opening session. That protocol is not present in
-envelope v1. Signatures alone cannot enforce it, and Rebyte does not label
+envelope v2. Signatures alone cannot enforce it, and Rebyte does not label
 capsule-finalization approvals as opening shares.
 
 FROST, specified
@@ -161,6 +207,31 @@ by [RFC 9591](https://www.rfc-editor.org/rfc/rfc9591), can later make one
 threshold signature compact, but it requires purpose-built key shares,
 coordinated setup and two interactive signing rounds. It cannot safely turn an
 arbitrary collection of existing private keys into one group key.
+
+Release policy controls where the CEK remains unavailable:
+
+```mermaid
+flowchart LR
+    E[Encrypted payload + AccessContract]
+    D{releasePolicy}
+    R[Listed recipient private key]
+    W[Fresh request to T of N witnesses]
+    T[Trusted time + durable release state]
+    K[Content key released]
+    X[Reject without plaintext]
+
+    E --> D
+    D -->|directRecipients| R
+    R -->|valid HPKE slot| K
+    D -->|quorum| W
+    W --> T
+    T -->|policy satisfied| K
+    T -->|too early / allowance consumed| X
+```
+
+Envelope v2 implements the upper direct branch and rejects the quorum branch.
+It never substitutes the local wall clock or a local counter for the missing
+witness protocol.
 
 ## Implemented flow
 
@@ -179,14 +250,15 @@ sequenceDiagram
     A-->>C: Alice GroupAcceptance
     B-->>C: Bob GroupAcceptance
     C->>C: Verify N-of-N and finalize GroupCertificate
+    C->>C: Bind AccessContract to group, recipients and .rba
     C->>C: Verify .rba, encrypt once, HPKE-wrap CEK for R
     C->>A: CapsuleProposal(ProposalId)
     C->>B: Same canonical CapsuleProposal
     A-->>C: Sign GroupId + ProposalId + AliceId
     B-->>C: Sign GroupId + ProposalId + BobId
     C->>C: Verify 2-of-2 and finalize .rbe
-    C-->>R: .rbe file or rbe1_ token
-    R->>R: Verify group, threshold, IDs and recipient slot
+    C-->>R: .rbe file or rbe2_ token
+    R->>R: Verify contract, group, threshold, IDs and recipient slot
     R->>R: HPKE unwrap CEK, AEAD decrypt, verify .rba
     R->>R: Reconstruct exact file or directory
 ```
@@ -202,17 +274,19 @@ flowchart LR
     K --> H2[HPKE slot · recipient 2..N]
 
     P[Public identities + threshold] --> G[Unanimous GroupCertificate]
-    G --> Q[Capsule ProposalId]
+    G --> C[Canonical AccessContract]
+    A --> C
+    C --> Q[Capsule ProposalId]
     E --> Q
     H1 --> Q
     H2 --> Q
     Q --> S[T unique Ed25519 approvals]
-    S --> R[Final .rbe / rbe1_]
+    S --> R[Final .rbe / rbe2_]
 ```
 
 ## Signed Merkle event graph
 
-The remainder of this section is roadmap, not an envelope v1 capability.
+The remainder of this section is roadmap, not an envelope v2 capability.
 
 Every state transition is a canonical event:
 
@@ -312,7 +386,7 @@ Authentication failures do not reveal partial CEK or plaintext bytes.
 
 ## Revocation and rotation
 
-The rules below are roadmap for the signed event graph; envelope v1 has no
+The rules below are roadmap for the signed event graph; envelope v2 has no
 key-status event or trusted online revocation check.
 
 Key status is an authenticated graph event and local trust decision:

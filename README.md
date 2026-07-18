@@ -18,14 +18,17 @@ command execution, lifecycle hooks or generated-code interpretation.
 group consensus. Every group member proves possession of the private key
 matching the public identity originally proposed; a configurable `T-of-N`
 threshold must then sign the exact encrypted capsule proposal before it becomes
-a portable `.rbe` or `rbe1_` capsule. Only explicitly listed recipient
-identities can decrypt it.
+a portable `.rbe` or `rbe2_` capsule. Its canonical Access Contract binds the
+group, content, recipients, capabilities and key-release policy. Only
+explicitly listed recipient identities can decrypt a direct-release capsule.
 
 Chain is deliberately not a cryptocurrency or global-consensus blockchain.
 The implemented envelope, its precise authorization boundary and the future
 event-graph work are documented in the
 [Chain architecture](docs/chain-architecture.md) and
-[Chain v1 specification](schemas/chain-v1.md).
+[Chain v2 specification](schemas/chain-v2.md). The independent
+[Access Contract v1 specification](schemas/access-contract-v1.md) explains
+which restrictions are cryptographically enforceable.
 
 ## Why Rebyte
 
@@ -35,6 +38,7 @@ event-graph work are documented in the
 - explicit publisher trust using production, staging and development channels;
 - encrypted offline signing keys and distributable public trust documents;
 - self-custodied Ed25519/X25519 identities and encrypted group capsules;
+- canonical contracts that bind authorization to exact encrypted content;
 - unanimous group formation plus configurable capsule approval thresholds;
 - portable paths, bounded decompression and strict rejection of symlinks;
 - dry-run diffs, per-file atomic replacement and recoverable transactions;
@@ -263,9 +267,10 @@ rebyte chain capsule open --file project.rbe \
 ```
 
 Capsule approval authorizes creation of that exact envelope; it is not a fresh
-approval ceremony every time a listed recipient opens it. Interactive
-`T-of-N` opening requires threshold secret sharing and session-bound encrypted
-shares and is intentionally outside Chain envelope v1.
+approval ceremony every time a listed recipient opens it. Chain v2 direct
+release rejects time and single-release restrictions. Such conditions belong
+to the quorum-release contract and require fresh, stateful witness cooperation;
+that release mechanism is specified but not yet implemented.
 
 ## CLI overview
 

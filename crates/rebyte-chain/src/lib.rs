@@ -19,7 +19,8 @@ mod identity;
 
 pub use envelope::{
     CAPSULE_TOKEN_PREFIX, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainLimits,
-    OpenedCapsule, approve_capsule, create_capsule_proposal, finalize_capsule, open_capsule,
+    OpenedCapsule, approve_capsule, create_capsule_proposal, create_capsule_proposal_with_contract,
+    finalize_capsule, open_capsule,
 };
 pub use error::ChainError;
 pub use group::{
@@ -29,6 +30,10 @@ pub use identity::{
     EncryptedIdentityDocument, IdentityId, IdentityPublicDocument, UnlockedIdentity,
     generate_identity,
 };
+pub use rebyte_contract::{
+    AccessContract, AccessContractBuilder, Capabilities, Capability, ContentCommitment,
+    ContentKind, ContractError, ContractId, PrincipalId, QuorumRelease, ReleasePolicy,
+};
 
 #[cfg(test)]
 mod tests {
@@ -36,8 +41,10 @@ mod tests {
     use rebyte_format::SecurityLimits;
 
     use super::{
-        CapsuleEnvelope, ChainError, ChainLimits, accept_group, approve_capsule,
-        create_capsule_proposal, finalize_capsule, finalize_group, open_capsule,
+        AccessContract, Capabilities, CapsuleEnvelope, ChainError, ChainLimits, ContentCommitment,
+        ContentKind, PrincipalId, QuorumRelease, ReleasePolicy, accept_group, approve_capsule,
+        create_capsule_proposal, create_capsule_proposal_with_contract, finalize_capsule,
+        finalize_group, open_capsule,
     };
     use crate::group::{deterministic_group, replace_acceptance_signature};
     use crate::identity::deterministic_identity;
@@ -194,11 +201,55 @@ mod tests {
             ..ChainLimits::STANDARD
         };
         let proposal = create_capsule_proposal(
-            group,
+            group.clone(),
             &artifact_bytes()?,
             vec![identity.public_identity().clone()],
             &limits,
         )?;
+        assert!(matches!(
+            proposal.contract().release(),
+            ReleasePolicy::DirectRecipients
+        ));
+        assert_eq!(
+            proposal.contract().content().digest(),
+            proposal.artifact_digest()
+        );
+        assert_eq!(
+            proposal.contract().content().size(),
+            proposal.artifact_size()
+        );
+        let quorum = QuorumRelease::new(
+            vec![PrincipalId::from_bytes(*identity.identity_id().as_bytes())],
+            1,
+            Some(1_800_000_000_000),
+            Some(1),
+        )?;
+        let quorum_contract = AccessContract::builder(
+            PrincipalId::from_bytes(*group.group_id()?.as_bytes()),
+            ContentCommitment::new(
+                ContentKind::ExactArtifact,
+                *proposal.artifact_digest(),
+                proposal.artifact_size(),
+            ),
+        )
+        .controllers(
+            proposal.contract().controllers().to_vec(),
+            group.capsule_threshold(),
+        )
+        .recipients(proposal.contract().recipients().to_vec())
+        .capabilities(Capabilities::RECONSTRUCT)
+        .release(ReleasePolicy::Quorum(quorum))
+        .build()?;
+        assert!(matches!(
+            create_capsule_proposal_with_contract(
+                group,
+                &artifact_bytes()?,
+                vec![identity.public_identity().clone()],
+                quorum_contract,
+                &limits,
+            ),
+            Err(ChainError::UnsupportedReleasePolicy)
+        ));
         let approval = approve_capsule(&proposal, &identity, &limits)?;
         let envelope = finalize_capsule(proposal, vec![approval], &limits)?;
         let bytes = envelope.to_bytes(&limits)?;

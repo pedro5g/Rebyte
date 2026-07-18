@@ -16,11 +16,14 @@ pub use rebyte_artifact_token::{
     encode_artifact_token,
 };
 pub use rebyte_chain::{
-    CAPSULE_TOKEN_PREFIX as CHAIN_CAPSULE_TOKEN_PREFIX, CapsuleApproval, CapsuleEnvelope,
-    CapsuleProposal, ChainError, ChainLimits, EncryptedIdentityDocument, GroupAcceptance,
-    GroupCertificate, GroupId, GroupProposal, IdentityId, IdentityPublicDocument, OpenedCapsule,
-    UnlockedIdentity, accept_group, approve_capsule, create_capsule_proposal, finalize_capsule,
-    finalize_group, generate_identity, open_capsule,
+    AccessContract, AccessContractBuilder, CAPSULE_TOKEN_PREFIX as CHAIN_CAPSULE_TOKEN_PREFIX,
+    Capabilities, Capability, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError,
+    ChainLimits, ContentCommitment, ContentKind, ContractError, ContractId,
+    EncryptedIdentityDocument, GroupAcceptance, GroupCertificate, GroupId, GroupProposal,
+    IdentityId, IdentityPublicDocument, OpenedCapsule, PrincipalId, QuorumRelease, ReleasePolicy,
+    UnlockedIdentity, accept_group, approve_capsule, create_capsule_proposal,
+    create_capsule_proposal_with_contract, finalize_capsule, finalize_group, generate_identity,
+    open_capsule,
 };
 pub use rebyte_diff::{ChangeKind, DiffEntry, DiffError, DiffReport, DiffSummary, diff_capsule};
 pub use rebyte_file_token::{

@@ -52,14 +52,19 @@ threshold and complete sorted public identity packages. Every member signs the
 same `GroupId` together with its own `IdentityId`; a different private key
 cannot occupy that member slot.
 
-Capsule creation first fully verifies a canonical `.rba`, generates a random
-256-bit CEK and encrypts the artifact once with XChaCha20-Poly1305. RFC 9180
+Capsule creation first fully verifies a canonical `.rba` and creates or
+validates a canonical Access Contract. The contract must exactly match the
+group, complete controller set, sealing threshold, recipients, content kind,
+artifact digest and exact byte length.
+
+Direct-recipient creation then generates a random 256-bit CEK and encrypts the
+artifact once with XChaCha20-Poly1305. RFC 9180
 HPKE Base mode with X25519-HKDF-SHA256, HKDF-SHA256 and ChaCha20-Poly1305 wraps
 the same CEK independently to every sorted recipient. The proposal commitment
 covers:
 
 - the complete unanimous group certificate and `GroupId`;
-- artifact digest and exact byte length;
+- the complete Access Contract and `ContractId`;
 - proposal and payload nonces;
 - every complete recipient identity and HPKE slot;
 - the encrypted payload digest.
@@ -74,10 +79,16 @@ released only after payload authentication, exact length/digest checks and
 full inner `.rba` decoding. CLI reconstruction uses exclusive output creation
 and does not overwrite an existing path.
 
-The capsule threshold authorizes envelope creation. It is not a threshold
+The capsule threshold authorizes envelope creation. Direct release is not a threshold
 secret-sharing scheme and does not require members to approve every future
 open. Every explicitly listed recipient can decrypt independently. This
-distinction is part of the v1 security contract.
+distinction is part of the v2 security contract.
+
+Time and maximum-release fields exist only in a quorum-release contract.
+Envelope v2 rejects that policy until an interactive witness protocol exists;
+it never treats the local clock or a restorable local counter as trusted.
+Even a valid single key release cannot force a recipient to delete retained
+plaintext or key material.
 
 ## Semantic patch boundary
 
@@ -118,8 +129,10 @@ come from the local keyring.
 Chain uses distinct derive-key contexts for identity IDs, group IDs, group
 certificate digests, embedded artifact digests, proposal-core digests,
 ciphertext digests, proposal IDs and envelope IDs. Ed25519 messages and AEAD
-associated data also carry distinct fixed byte domains. The exact v1 strings
-and binary layouts are frozen in [the Chain specification](../schemas/chain-v1.md).
+associated data also carry distinct fixed byte domains. The exact v2 strings
+and binary layouts are frozen in [the Chain specification](../schemas/chain-v2.md).
+Access policy encoding and its enforcement boundary are frozen separately in
+[Access Contract v1](../schemas/access-contract-v1.md).
 
 ## Trust policy
 
@@ -156,9 +169,9 @@ run can inspect, roll back or resume the persisted transaction.
 | UTF-8 path | 1024 bytes |
 | Compression ratio | 200:1 |
 
-Chain standard limits add 64 group members, 64 recipients, a 38 MiB binary
-envelope and a 52 MiB text token while retaining the simple-artifact policy for
-the inner `.rba`.
+Chain standard limits add 64 group members, 64 recipients, a 16 KiB Access
+Contract, a 38 MiB binary envelope and a 52 MiB text token while retaining the
+simple-artifact policy for the inner `.rba`.
 
 Applications may lower these values. Raising them is a local policy decision;
 the capsule or artifact cannot change them. The unsigned streaming

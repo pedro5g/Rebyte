@@ -295,9 +295,11 @@ The input must be a canonical `.rba` already produced by
 XChaCha20-Poly1305 and wraps that same key independently to every recipient
 using RFC 9180 HPKE. Recipients are sorted, unique and limited to 64.
 
-The resulting `ProposalId` commits the group certificate, artifact digest and
-length, recipient identities, HPKE slots and ciphertext digest. A group member
-is not implicitly a recipient.
+Rebyte also creates a direct-release Access Contract that binds the complete
+group controller set, sealing threshold, artifact digest and length, recipient
+identities and exact-artifact capabilities. The resulting `ProposalId` commits
+that contract, the group certificate, HPKE slots and ciphertext digest. A group
+member is not implicitly a recipient.
 
 ### `chain capsule approve`
 
@@ -322,7 +324,7 @@ rebyte chain capsule finalize CAPSULE.proposal.rbep
 
 Verifies unique approvals against the immutable group threshold and emits the
 canonical binary `.rbe`. `--print-token` additionally writes the equivalent
-single-line `rbe1_` Base64URL form to stdout. The text token contains the same
+single-line `rbe2_` Base64URL form to stdout. The text token contains the same
 encrypted bytes and can be very large; prefer `.rbe` for files and directories
 that are not small.
 
@@ -331,14 +333,15 @@ that are not small.
 ```text
 rebyte chain capsule inspect --file CAPSULE.proposal.rbep [--json]
 rebyte chain capsule inspect --file CAPSULE.rbe [--json]
-rebyte chain capsule inspect rbe1_TOKEN [--json]
+rebyte chain capsule inspect rbe2_TOKEN [--json]
 ```
 
-For a proposal, validates the complete group certificate, proposal
-commitments, recipients and canonical encoding so members can review before
-approving. For a final envelope, it additionally verifies the threshold
-approvals. Inspection never decrypts the artifact. Public recipient names and
-capsule sizes are not confidential metadata.
+For a proposal, validates the complete group certificate, Access Contract,
+proposal commitments, recipients and canonical encoding so members can review
+the `ContractId`, release policy and capabilities before approving. For a final
+envelope, it additionally verifies the threshold approvals. Inspection never
+decrypts the artifact. Public recipient names and capsule sizes are not
+confidential metadata.
 
 ### `chain capsule open`
 
@@ -347,7 +350,7 @@ rebyte chain capsule open --file CAPSULE.rbe
   --private-key RECIPIENT.rbk [--passphrase-file PATH]
   --output FILE_OR_DIRECTORY [--raw-artifact] [--json]
 
-rebyte chain capsule open rbe1_TOKEN
+rebyte chain capsule open rbe2_TOKEN
   --private-key RECIPIENT.rbk [--passphrase-file PATH]
   --output FILE_OR_DIRECTORY [--json]
 ```
@@ -358,8 +361,9 @@ all succeed. `--raw-artifact` writes the decrypted canonical `.rba` instead of
 reconstructing its contents.
 
 Each explicitly listed recipient can open independently after finalization.
-The capsule threshold authorizes creation of the envelope; envelope v1 does
-not require fresh member participation for every open.
+The capsule threshold authorizes creation of the envelope; envelope v2 direct
+release does not require fresh member participation for every open. Time and
+maximum-release policies are rejected until quorum release is implemented.
 
 ## Consumer commands
 

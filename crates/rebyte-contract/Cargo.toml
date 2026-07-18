@@ -1,0 +1,21 @@
+[package]
+name = "rebyte-contract"
+description = "Canonical capability and release contracts for Rebyte artifacts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["authorization", "capability", "policy", "security"]
+categories = ["cryptography", "encoding"]
+
+[dependencies]
+base64.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+
+[lints]
+workspace = true

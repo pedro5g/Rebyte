@@ -1,4 +1,4 @@
-# Rebyte Chain envelope v1
+# Rebyte Chain envelope v2
 
 Copyright (c) 2026 Pedro Martins (pedro5g)
 
@@ -8,18 +8,21 @@ has not received an independent cryptographic audit.
 
 ## Scope
 
-Chain envelope v1 transports one canonical Rebyte `.rba` artifact with:
+Chain envelope v2 transports one canonical Rebyte `.rba` artifact with:
 
 - self-custodied identities containing independent signing and encryption keys;
 - unanimous proof-of-possession when a group is formed;
 - `T-of-N` Ed25519 authorization of one exact encrypted capsule proposal;
+- a canonical Access Contract binding content, controllers, recipients,
+  capabilities and the content-key release mechanism;
 - one payload ciphertext and one HPKE-wrapped content key per recipient;
 - byte-exact file or portable-directory reconstruction after full validation.
 
-The capsule approval threshold authorizes envelope creation. It does not
+The capsule sealing threshold authorizes envelope creation. It does not
 require members to come online again for each open. Every listed recipient can
-open independently with its own private identity. Session-bound threshold
-opening and the signed event graph are separate future protocol layers.
+open a direct-release contract independently with its own private identity.
+Quorum-release contracts are represented by the contract protocol but rejected
+by envelope v2 until the interactive key-share protocol is implemented.
 
 ## Algorithms
 
@@ -50,7 +53,8 @@ acceptances, group certificates and capsule approvals are strict
 schema-versioned JSON documents. Unknown fields are rejected. Base64URL fields
 must be unpadded and canonical.
 
-For v1, the wire representation is exactly the UTF-8 pretty JSON emitted by
+For JSON control documents, the wire representation is exactly the UTF-8
+pretty JSON emitted by
 the Rust implementation, including field order, two-space indentation and one
 final line feed. Parsing and reserialization must reproduce every byte.
 Whitespace-reformatted JSON is therefore rejected even if its data model is
@@ -99,9 +103,10 @@ by exactly that many bytes. There are no alignment bytes.
 ```text
 CapsuleProposal {
     magic                 [4]byte = "RBEP"
-    wire_version          u16 = 1
+    wire_version          u16 = 2
     crypto_suite          u16 = 1
     group_certificate     bytes32
+    access_contract       bytes32
     proposal_nonce        [32]byte
     artifact_digest       [32]byte
     artifact_size         u64
@@ -117,15 +122,19 @@ CapsuleProposal {
 }
 ```
 
-Recipients are sorted and unique by `IdentityId`; v1 permits 1 to 64. The
+Recipients are sorted and unique by `IdentityId`; v2 permits 1 to 64. The
 inner artifact is fully decoded and verified before encryption. The encoder:
 
-1. generates a fresh 32-byte CEK, proposal nonce and payload nonce;
-2. computes the group-certificate, artifact and proposal-core commitments;
-3. encrypts the complete canonical `.rba` once with XChaCha20-Poly1305;
-4. uses RFC 9180 HPKE independently for each public X25519 recipient key;
-5. wraps only the same 32-byte CEK in each recipient slot;
-6. computes `ProposalId` over the group, artifact, recipients, HPKE slots and
+1. validates that the contract exactly binds the group ID, complete controller
+   set, sealing threshold, recipient set, artifact digest, artifact size and
+   exact-artifact content kind;
+2. rejects quorum release rather than weakening it to direct recipient slots;
+3. generates a fresh 32-byte CEK, proposal nonce and payload nonce;
+4. computes the group-certificate, contract and proposal-core commitments;
+5. encrypts the complete canonical `.rba` once with XChaCha20-Poly1305;
+6. uses RFC 9180 HPKE independently for each public X25519 recipient key;
+7. wraps only the same 32-byte CEK in each recipient slot;
+8. computes `ProposalId` over the group, contract, recipients, HPKE slots and
    ciphertext digest.
 
 The group, proposal nonce and recipient identity are bound into HPKE `info`.
@@ -138,7 +147,7 @@ recipient invalidates the proposal.
 One approval signs:
 
 ```text
-"rebyte chain capsule approval v1\0" ||
+"rebyte chain capsule approval v2\0" ||
 GroupId ||
 ProposalId ||
 ApprovingMemberIdentityId
@@ -150,7 +159,7 @@ private key is invalid. Duplicate approvals never count twice.
 ```text
 CapsuleEnvelope {
     magic                 [4]byte = "RBEE"
-    wire_version          u16 = 1
+    wire_version          u16 = 2
     crypto_suite          u16 = 1
     proposal              bytes32
     approval_count        u16
@@ -166,9 +175,13 @@ Approvals are sorted and unique by member identity. `approval_count` must meet
 the immutable threshold in the unanimous group certificate. `EnvelopeId`
 commits to `ProposalId` and every approval identity/signature pair.
 
-A binary envelope uses `.rbe`. The textual form is `rbe1_` followed by
+A binary envelope uses `.rbe`. The textual form is `rbe2_` followed by
 unpadded Base64URL of those exact bytes. Text is transport encoding, not
 additional cryptography.
+
+Envelope v1 and the `rbe1_` text form are deliberately not accepted by the v2
+decoder. Applications must never guess a version or reinterpret old bytes
+under new authorization semantics.
 
 ## Standard limits
 
@@ -179,7 +192,8 @@ additional cryptography.
 | Group JSON inside an envelope | 1 MiB |
 | Public identity JSON inside a slot | 64 KiB |
 | Binary proposal or envelope | 38 MiB |
-| Textual `rbe1_` token | 52 MiB |
+| Canonical Access Contract | 16 KiB |
+| Textual `rbe2_` token | 52 MiB |
 | Inner artifact policy | `SecurityLimits::SIMPLE_ARTIFACT` |
 
 Every declared length uses checked conversion and arithmetic. Unknown versions
@@ -194,14 +208,18 @@ Plaintext `.rba` bytes are released only after:
 2. strict Base64URL decoding when textual;
 3. canonical proposal and envelope parsing with no trailing bytes;
 4. verifying every public identity and unanimous group acceptance;
-5. recomputing `GroupId`, `ProposalId` and `EnvelopeId`;
-6. verifying the configured number of unique capsule approvals;
-7. finding the opener's exact recipient identity;
-8. HPKE-decapsulating that recipient's CEK slot;
-9. authenticating and decrypting the payload;
-10. checking the exact plaintext length and Chain artifact digest;
-11. decoding and fully verifying the inner canonical `.rba`;
-12. reconstructing through the existing exclusive, no-symlink artifact path.
+5. validating the canonical Access Contract and its identifier;
+6. proving exact equality between the contract and group, sealing threshold,
+   recipients, content digest and content size;
+7. recomputing `GroupId`, `ProposalId` and `EnvelopeId`;
+8. verifying the configured number of unique capsule approvals;
+9. rejecting any unsupported release policy;
+10. finding the opener's exact recipient identity and `decrypt` capability;
+11. HPKE-decapsulating that recipient's CEK slot;
+12. authenticating and decrypting the payload;
+13. checking the exact plaintext length and Chain artifact digest;
+14. decoding and fully verifying the inner canonical `.rba`;
+15. reconstructing through the existing exclusive, no-symlink artifact path.
 
 Cryptographic failures do not expose partial keys or plaintext in error
 messages. Existing output paths are never overwritten by the CLI.
