@@ -25,9 +25,9 @@ The project does not claim to be bug-free or independently audited. High-value
 deployments should review the protocol, signing integration and local
 filesystem assumptions in their own threat model.
 
-Unsigned `rf1_` file tokens are a convenience transport with bounded
-decompression and digest verification. They do not authenticate an author and
-must not replace signed RAP capsules at a trust boundary.
+Unsigned `ra1_`/`.rba` artifacts are a convenience transport with bounded
+decompression and digest verification. They do not authenticate an author,
+encrypt content or replace signed RAP/Chain capsules at a trust boundary.
 
 ## Key compromise
 

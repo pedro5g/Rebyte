@@ -28,10 +28,12 @@ allowance decisions.
 Chain is deliberately not a cryptocurrency or global-consensus blockchain.
 The implemented envelope, its precise authorization boundary and the future
 event-graph work are documented in the
+[system architecture](docs/architecture.md),
 [Chain architecture](docs/chain-architecture.md) and
 [Chain v2 specification](schemas/chain-v2.md). The independent
 [Access Contract v1 specification](schemas/access-contract-v1.md) explains
-which restrictions are cryptographically enforceable.
+which restrictions are cryptographically enforceable. Deployments using
+private data should follow the [Chain operations runbook](docs/chain-operations.md).
 
 ## Why Rebyte
 

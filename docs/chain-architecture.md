@@ -38,7 +38,7 @@ Chain envelope v2 provides:
 - byte-exact `.rba` artifacts and canonical Semantic Patch v1 as protected
   content kinds;
 - canonical binary `.rbe`, textual `rbe2_` and strict control documents;
-- native Rust and CLI APIs with no network dependency.
+- native Rust and CLI APIs with no network dependency;
 - Shamir `T-of-N` CEK shares, fresh recipient-signed requests and
   witness-signed HPKE grants;
 - witness-enforced release dates and unanimous finite release allowances.
@@ -480,7 +480,7 @@ Completed gates:
 8. encrypted canonical semantic patches with capability-gated preview,
    preconditions, backup and atomic application;
 9. mutation, representative truncation, wrong-key, threshold and fuzz-harness
-   coverage.
+   coverage;
 10. fresh signed release requests, witness-signed HPKE grants, Shamir
     reconstruction, trusted-time gates and append-only release ledgers.
 

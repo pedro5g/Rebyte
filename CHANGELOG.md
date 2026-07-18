@@ -55,6 +55,11 @@ and releases follow Semantic Versioning.
   security boundary, CLI, Rust API, modular layer diagram and multi-party flow;
   retain hardware authority adapters and the signed Merkle event history as
   explicit roadmap layers.
+- Add a unified system-architecture map and a production operations runbook
+  covering identity, group, recipient, witness, trusted-time, backup,
+  rotation, recovery and incident ceremonies.
+- Record the current 80.92% workspace line-coverage baseline and the remaining
+  critical-module gaps instead of presenting the long-term targets as met.
 
 ## [1.2.0] - 2026-07-17
 

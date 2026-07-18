@@ -25,6 +25,17 @@ vector, malformed-input, large-text process integration and fuzz tests. This is
 an improvement over 1.0.0, but it does not satisfy the long-term workspace or
 critical-module targets; those targets remain open quality work.
 
+The current unreleased Chain v2 workspace measures 80.92% line coverage on
+2026-07-18 after removing File Token v1. Security-sensitive results include
+96.21% for quorum release, 97.83% for Shamir secret sharing, 90.44% for the
+encrypted envelope, 91.01% for Access Contract v1, 91.28% for the in-memory
+artifact codec and 90.80% for the CLI release ledger. RAP decode is 92.55%,
+portable paths are 80.00%, artifact streaming is 85.79%, verification is
+82.26% and filesystem apply is 83.19%. The aggregate improved, but the
+workspace and several critical modules still do not meet the stated 90%/95%
+targets. A release must report this gap honestly rather than relabeling tested
+behavior as independently audited assurance.
+
 Scheduled CI publishes `lcov.info` and Criterion estimates. Reviewers compare
 critical-operation medians against the most recent accepted artifact. A
 regression over 10% requires investigation; a regression over 20% blocks a
