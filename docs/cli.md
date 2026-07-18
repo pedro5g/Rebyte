@@ -24,8 +24,7 @@ rebyte help verify
 - existing key, capsule, token and reconstructed output files are never
   overwritten.
 - `ra1_` artifact tokens and `.rba` files provide integrity without publisher
-  authentication; legacy `rf1_` file tokens remain decode-only;
-  `rb1_` RAP tokens require signature and trust verification.
+  authentication; `rb1_` RAP tokens require signature and trust verification.
 
 ## Simple unsigned artifacts
 

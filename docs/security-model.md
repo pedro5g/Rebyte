@@ -29,8 +29,8 @@ canonical manifest, enforce exact stored and reconstructed lengths, decompress
 into staging, compare envelope, content and per-file domain-separated digests,
 and only then create a new output. Directory entries are portable and
 symlinks are forbidden. There is deliberately no publisher or trust-policy
-step, so this mode must not authorize installation or execution. Legacy
-`rf1_` tokens retain their original single-file decode pipeline.
+step, so this mode must not authorize installation or execution. The removed
+`rf1_` format is not accepted by the definitive CLI/API.
 
 An optional artifact dictionary is stored inside the canonical manifest. It
 is bounded, covered by the envelope digest, permitted only for Zstandard and

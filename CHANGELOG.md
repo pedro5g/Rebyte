@@ -44,6 +44,11 @@ and releases follow Semantic Versioning.
 - Make transaction cleanup idempotent when Windows reports `NotFound` after the
   last recursively removed journal entry disappears.
 
+### Removed
+
+- Remove the superseded `rf1_` codec, `rebyte-file-token` crate, compatibility
+  decoder and fuzz target. `ra1_`/`.rba` is now the only unsigned artifact API.
+
 ### Documentation
 
 - Specify the implemented Chain v2 and Access Contract v1 wire formats,

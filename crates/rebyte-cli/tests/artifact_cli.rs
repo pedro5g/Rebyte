@@ -1,4 +1,4 @@
-//! End-to-end unsigned single-file token workflow.
+//! End-to-end unsigned artifact workflow.
 
 #![forbid(unsafe_code)]
 
@@ -187,6 +187,21 @@ fn token_files_stdin_json_integrity_and_no_overwrite_are_enforced()
         .output()?;
     assert!(!corrupted.status.success());
     assert!(!corrupted_output.exists());
+    Ok(())
+}
+
+#[test]
+fn removed_rf1_format_is_rejected_without_creating_output() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempdir()?;
+    let output = directory.path().join("must-not-exist.bin");
+    let decoded = rebyte()
+        .args(["decode", "rf1_UkJGVAE", "--output", path_text(&output)?])
+        .output()?;
+
+    assert_eq!(decoded.status.code(), Some(2));
+    assert!(stderr_text(&decoded).contains("not an ra1_ token or binary .rba artifact"));
+    assert!(!output.exists());
     Ok(())
 }
 

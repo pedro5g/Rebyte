@@ -7,8 +7,8 @@ Copyright (c) 2026 Pedro Martins (pedro5g)
 Rebyte protects the bytes and portable metadata of files reconstructed below a
 root directory selected by the local user. It also protects the authenticity
 of the publisher and the integrity of signed capsules presented to the CLI.
-Unsigned `ra1_`/`.rba` artifacts, standalone semantic patches and legacy `rf1_` tokens
-make no authenticity claim.
+Unsigned `ra1_`/`.rba` artifacts and standalone semantic patches make no
+authenticity claim.
 
 Chain additionally protects encrypted `.rba` confidentiality from parties that
 do not possess an explicitly listed recipient private identity. It

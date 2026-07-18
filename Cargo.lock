@@ -1263,7 +1263,6 @@ dependencies = [
  "rebyte-artifact-token",
  "rebyte-chain",
  "rebyte-diff",
- "rebyte-file-token",
  "rebyte-format",
  "rebyte-pack",
  "rebyte-semantic",
@@ -1280,17 +1279,6 @@ dependencies = [
  "rebyte-verify",
  "similar",
  "tempfile",
-]
-
-[[package]]
-name = "rebyte-file-token"
-version = "1.2.0"
-dependencies = [
- "base64",
- "proptest",
- "rebyte-compression",
- "rebyte-format",
- "rebyte-integrity",
 ]
 
 [[package]]

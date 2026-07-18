@@ -2,8 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+mod artifact_command;
 mod chain_command;
-mod file_token_command;
 mod hash_command;
 mod keys;
 mod producer;
@@ -73,9 +73,9 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Encode one file or folder as an unsigned, integrity-checked artifact.
-    Encode(file_token_command::EncodeCommand),
+    Encode(artifact_command::EncodeCommand),
     /// Preview or reconstruct an unsigned artifact byte for byte.
-    Decode(file_token_command::DecodeCommand),
+    Decode(artifact_command::DecodeCommand),
     /// Pack a directory, sign it and self-verify the resulting capsule.
     Pack(producer::PackCommand),
     /// Compute or check a domain-separated RAP file digest.
@@ -240,8 +240,8 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), CliError> {
     match Cli::parse().command {
-        Commands::Encode(command) => file_token_command::encode(&command),
-        Commands::Decode(command) => file_token_command::decode(&command),
+        Commands::Encode(command) => artifact_command::encode(&command),
+        Commands::Decode(command) => artifact_command::decode(&command),
         Commands::Pack(command) => producer::run(&command),
         Commands::Hash(command) => hash_command::run(&command),
         Commands::Patch(command) => semantic_command::run(&command),

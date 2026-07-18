@@ -91,8 +91,8 @@ $REBYTE decode "$TOKEN" --output ./copy.txt
 `ra1_` is not a signature. Anyone can create a different internally valid
 token. Use the signed workflow below for releases, deployments or any input
 crossing a trust boundary. The complete format and verification order are in
-[Artifact Token v1](schemas/artifact-token-v1.md). Legacy `rf1_` file tokens
-remain decodable.
+[Artifact Token v1](schemas/artifact-token-v1.md). The earlier `rf1_` format
+and its overlapping Rust API have been removed; use only `ra1_`/`.rba`.
 
 For inputs above the standard 64 `MiB` per-file limit, use the bounded streaming
 binary mode. It never places the full source, compressed artifact or restored

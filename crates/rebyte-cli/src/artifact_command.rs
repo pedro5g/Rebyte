@@ -10,9 +10,9 @@ use clap::{Args, ValueEnum};
 use rebyte_core::{
     ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactDictionary, ArtifactEntry,
     ArtifactEntryKind, ArtifactIoError, ArtifactKind, ArtifactOptions, ArtifactPathMetadata,
-    ArtifactTokenError, CompressionProfile, DecodedArtifact, FileTokenError, StreamArtifactReport,
-    decode_artifact, decode_artifact_file, decode_artifact_file_expected, decode_artifact_token,
-    decode_file_token, encode_artifact, encode_artifact_path,
+    ArtifactTokenError, CompressionProfile, DecodedArtifact, StreamArtifactReport, decode_artifact,
+    decode_artifact_file, decode_artifact_file_expected, decode_artifact_token, encode_artifact,
+    encode_artifact_path,
 };
 use rebyte_format::{CompressionAlgorithm, RelativeArtifactPath, SecurityLimits};
 use serde::Serialize;
@@ -60,10 +60,10 @@ pub(super) struct EncodeCommand {
 
 #[derive(Debug, Args)]
 pub(super) struct DecodeCommand {
-    /// `ra1_`/legacy `rf1_` token, or `-` to read text from standard input.
+    /// `ra1_` token, or `-` to read text from standard input.
     #[arg(value_name = "TOKEN", conflicts_with = "token_file")]
     token: Option<String>,
-    /// Read an `ra1_`, legacy `rf1_` or binary `.rba` from a file.
+    /// Read an `ra1_` token or binary `.rba` from a file.
     #[arg(long = "file", value_name = "PATH", conflicts_with = "token")]
     token_file: Option<PathBuf>,
     /// Exact output path; overrides all embedded destination metadata.
@@ -335,7 +335,6 @@ pub(super) fn decode(command: &DecodeCommand) -> Result<(), CliError> {
         ));
     }
     match read_input(command)? {
-        SimpleInput::LegacyToken(token) => decode_legacy(command, &token),
         SimpleInput::ArtifactToken(token) => {
             let decoded = decode_artifact_token(&token, &SecurityLimits::SIMPLE_ARTIFACT)
                 .map_err(artifact_decode_error)?;
@@ -459,50 +458,6 @@ fn decode_artifact_command(
         write_json(&report)
     } else {
         print_decode_report(&report);
-        Ok(())
-    }
-}
-
-fn decode_legacy(command: &DecodeCommand, token: &str) -> Result<(), CliError> {
-    let output = command.output.as_ref().ok_or_else(|| {
-        CliError::new(
-            EXIT_MALFORMED,
-            "legacy rf1_ tokens have no destination metadata; pass --output",
-        )
-    })?;
-    let decoded =
-        decode_file_token(token, &SecurityLimits::SIMPLE_ARTIFACT).map_err(legacy_decode_error)?;
-    create_parent(output)?;
-    write_new(output, decoded.bytes(), false).map_err(|error| {
-        CliError::new(
-            EXIT_GENERIC,
-            format!(
-                "cannot create reconstructed file {}: {error}",
-                output.display()
-            ),
-        )
-    })?;
-    if command.json {
-        write_json(&LegacyDecodeReport {
-            schema_version: 1,
-            kind: "unsignedFileToken",
-            authenticated: false,
-            integrity_verified: true,
-            digest: encode_digest(&decoded.digest()),
-            reconstructed_bytes: decoded.original_size(),
-            stored_bytes: decoded.stored_size(),
-            compression: compression_name(decoded.compression()),
-            output: output.to_string_lossy().into_owned(),
-        })
-    } else {
-        println!(
-            "{}",
-            super::ui::success("✓ Legacy file token verified and reconstructed")
-        );
-        println!("  Output      {}", output.display());
-        println!("  Bytes       {}", decoded.original_size());
-        println!("  Digest      {}", encode_digest(&decoded.digest()));
-        println!("  Authenticity unsigned · integrity only");
         Ok(())
     }
 }
@@ -697,14 +652,12 @@ fn read_input(command: &DecodeCommand) -> Result<SimpleInput, CliError> {
     let token = value
         .trim_matches(|character: char| character.is_ascii_whitespace())
         .to_string();
-    if token.starts_with("rf1_") {
-        Ok(SimpleInput::LegacyToken(token))
-    } else if token.starts_with(ARTIFACT_TOKEN_PREFIX) {
+    if token.starts_with(ARTIFACT_TOKEN_PREFIX) {
         Ok(SimpleInput::ArtifactToken(token))
     } else {
         Err(CliError::new(
             EXIT_MALFORMED,
-            "input is not an ra1_, rf1_ or binary .rba artifact",
+            "input is not an ra1_ token or binary .rba artifact",
         ))
     }
 }
@@ -1041,18 +994,6 @@ fn artifact_decode_error(error: ArtifactTokenError) -> CliError {
     CliError::new(exit_code, error.to_string())
 }
 
-fn legacy_decode_error(error: FileTokenError) -> CliError {
-    let exit_code = if matches!(
-        error,
-        FileTokenError::DigestMismatch | FileTokenError::Compression(_)
-    ) {
-        EXIT_DIGEST
-    } else {
-        EXIT_MALFORMED
-    };
-    CliError::new(exit_code, error.to_string())
-}
-
 const fn artifact_kind_name(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::File => "file",
@@ -1116,7 +1057,6 @@ fn print_decode_report(report: &DecodeReport<'_>) {
 }
 
 enum SimpleInput {
-    LegacyToken(String),
     ArtifactToken(String),
     ArtifactBinary(Vec<u8>),
 }
@@ -1158,18 +1098,4 @@ struct DecodeReport<'a> {
     suggested_path: Option<&'a str>,
     output: Option<String>,
     written: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyDecodeReport {
-    schema_version: u16,
-    kind: &'static str,
-    authenticated: bool,
-    integrity_verified: bool,
-    digest: String,
-    reconstructed_bytes: u64,
-    stored_bytes: u64,
-    compression: &'static str,
-    output: String,
 }

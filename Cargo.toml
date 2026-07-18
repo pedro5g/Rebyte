@@ -6,7 +6,6 @@ members = [
     "crates/rebyte-codec",
     "crates/rebyte-integrity",
     "crates/rebyte-compression",
-    "crates/rebyte-file-token",
     "crates/rebyte-artifact-token",
     "crates/rebyte-semantic",
     "crates/rebyte-contract",

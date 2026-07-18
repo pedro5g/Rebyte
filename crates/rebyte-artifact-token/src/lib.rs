@@ -24,3 +24,4 @@ pub use model::{
     Artifact, ArtifactCompression, ArtifactDictionary, ArtifactEntry, ArtifactEntryKind,
     ArtifactKind, ArtifactOptions, DecodedArtifact, EncodedArtifact,
 };
+pub use rebyte_compression::CompressionProfile;

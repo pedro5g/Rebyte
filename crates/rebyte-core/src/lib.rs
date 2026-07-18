@@ -11,7 +11,7 @@ pub use rebyte_apply::{
 pub use rebyte_artifact_token::{
     ARTIFACT_HEADER_SIZE, ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactDictionary,
     ArtifactEntry, ArtifactEntryKind, ArtifactIoError, ArtifactKind, ArtifactOptions,
-    ArtifactPathMetadata, ArtifactTokenError, DecodedArtifact, EncodedArtifact,
+    ArtifactPathMetadata, ArtifactTokenError, CompressionProfile, DecodedArtifact, EncodedArtifact,
     StreamArtifactReport, decode_artifact, decode_artifact_file, decode_artifact_file_expected,
     decode_artifact_token, encode_artifact, encode_artifact_binary_token, encode_artifact_path,
     encode_artifact_token,
@@ -33,11 +33,6 @@ pub use rebyte_chain::{
 pub use rebyte_diff::{
     ChangeKind, DiffEntry, DiffError, DiffReport, DiffSummary, DirectoryChangeKind,
     DirectoryDiffEntry, diff_capsule, diff_verified_directories, diff_verified_files,
-};
-pub use rebyte_file_token::{
-    CompressionProfile, DecodedFileToken, EncodedFileToken, FILE_TOKEN_HEADER_SIZE,
-    FILE_TOKEN_PREFIX, FileTokenCompression, FileTokenError, FileTokenOptions, decode_file_token,
-    encode_file_token,
 };
 pub use rebyte_format::{PROTOCOL_VERSION, SecurityLimits};
 pub use rebyte_pack::{ArtifactFile, PackError, PackOptions, UnsignedCapsule, pack};
