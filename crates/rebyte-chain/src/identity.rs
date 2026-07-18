@@ -176,10 +176,20 @@ impl IdentityPublicDocument {
 
     pub(crate) fn canonical_member_bytes(&self) -> Result<Vec<u8>, ChainError> {
         self.validate()?;
+        self.canonical_member_bytes_unchecked()
+    }
+
+    // Callers must have validated this document on the current data.
+    pub(crate) fn identity_id_unchecked(&self) -> Result<IdentityId, ChainError> {
+        Ok(IdentityId(decode_array(&self.identity_id)?))
+    }
+
+    // Callers must have validated this document on the current data.
+    pub(crate) fn canonical_member_bytes_unchecked(&self) -> Result<Vec<u8>, ChainError> {
         let mut bytes = identity_message(
             &self.display_name,
-            &self.signing_public_key()?,
-            &self.encryption_public_key()?,
+            &decode_array(&self.signing_public_key)?,
+            &decode_array(&self.encryption_public_key)?,
             &decode_array(&self.package_nonce)?,
         )?;
         bytes.extend_from_slice(&decode_array::<64>(&self.proof_signature)?);

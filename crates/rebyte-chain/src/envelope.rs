@@ -300,12 +300,13 @@ impl CapsuleProposal {
             return Err(ChainError::IntegrityMismatch);
         }
         let mut previous = None;
+        let mut holder_ids = Vec::with_capacity(self.slots.len());
         for slot in &self.slots {
             slot.holder.validate()?;
             if slot.wrapped_key.len() != wrapped_key_bytes(self.contract.release()) {
                 return Err(ChainError::IntegrityMismatch);
             }
-            let identity_id = slot.holder.identity_id()?;
+            let identity_id = slot.holder.identity_id_unchecked()?;
             if previous.is_some_and(|value| value >= identity_id) {
                 return Err(if previous == Some(identity_id) {
                     ChainError::DuplicateIdentity
@@ -314,17 +315,14 @@ impl CapsuleProposal {
                 });
             }
             previous = Some(identity_id);
+            holder_ids.push(identity_id);
         }
         validate_contract_bindings(
             &self.group,
             &self.contract,
             &self.content_digest,
             self.content_size,
-            &self
-                .slots
-                .iter()
-                .map(|slot| slot.holder.identity_id())
-                .collect::<Result<Vec<_>, _>>()?,
+            &holder_ids,
         )?;
         if calculate_proposal_id(self)? != self.proposal_id {
             return Err(ChainError::BindingMismatch);
@@ -426,7 +424,7 @@ impl CapsuleEnvelope {
         if approval_count == 0 || approval_count > proposal.group.proposal().members().len() {
             return Err(ChainError::InsufficientApprovals);
         }
-        let group_id = proposal.group.group_id()?;
+        let group_id = proposal.group.group_id_unchecked()?;
         let proposal_id = proposal.proposal_id;
         let mut approvals = Vec::with_capacity(approval_count);
         for _ in 0..approval_count {
@@ -532,6 +530,7 @@ impl CapsuleEnvelope {
         {
             return Err(ChainError::InsufficientApprovals);
         }
+        let group_id = self.proposal.group.group_id_unchecked()?;
         let mut previous = None;
         for approval in &self.approvals {
             let member_id = approval.member_id()?;
@@ -542,7 +541,7 @@ impl CapsuleEnvelope {
                     ChainError::NonCanonicalOrder
                 });
             }
-            verify_capsule_approval(&self.proposal, approval)?;
+            verify_capsule_approval(&group_id, &self.proposal, approval)?;
             previous = Some(member_id);
         }
         if calculate_envelope_id(&self.proposal, &self.approvals)? != self.envelope_id {
@@ -872,7 +871,7 @@ fn create_proposal_with_holders(
         u64::try_from(content_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
     let holder_ids: Vec<_> = holders
         .iter()
-        .map(IdentityPublicDocument::identity_id)
+        .map(IdentityPublicDocument::identity_id_unchecked)
         .collect::<Result<_, _>>()?;
     validate_contract_bindings(
         &group,
@@ -882,7 +881,7 @@ fn create_proposal_with_holders(
         &holder_ids,
     )?;
 
-    let group_id = group.group_id()?;
+    let group_id = group.group_id_unchecked()?;
     if holders.is_empty() || holders.len() > MAX_RECIPIENTS {
         return Err(ChainError::LimitExceeded);
     }
@@ -965,17 +964,17 @@ fn create_default_content_proposal(
     let content_digest = protected_content_digest(content_binary);
     let content_size =
         u64::try_from(content_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
-    let group_id = group.group_id()?;
+    let group_id = group.group_id_unchecked()?;
     let controllers = group
         .proposal()
         .members()
         .iter()
-        .map(IdentityPublicDocument::identity_id)
+        .map(IdentityPublicDocument::identity_id_unchecked)
         .map(|result| result.map(principal_id))
         .collect::<Result<Vec<_>, _>>()?;
     let recipient_ids = recipients
         .iter()
-        .map(IdentityPublicDocument::identity_id)
+        .map(IdentityPublicDocument::identity_id_unchecked)
         .map(|result| result.map(principal_id))
         .collect::<Result<Vec<_>, _>>()?;
     let contract = AccessContract::builder(
@@ -1009,22 +1008,22 @@ fn create_default_quorum_proposal(
     let content_digest = protected_content_digest(content_binary);
     let content_size =
         u64::try_from(content_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
-    let group_id = group.group_id()?;
+    let group_id = group.group_id_unchecked()?;
     let controllers = group
         .proposal()
         .members()
         .iter()
-        .map(IdentityPublicDocument::identity_id)
+        .map(IdentityPublicDocument::identity_id_unchecked)
         .map(|result| result.map(principal_id))
         .collect::<Result<Vec<_>, _>>()?;
     let recipient_ids = recipients
         .iter()
-        .map(IdentityPublicDocument::identity_id)
+        .map(IdentityPublicDocument::identity_id_unchecked)
         .map(|result| result.map(principal_id))
         .collect::<Result<Vec<_>, _>>()?;
     let witness_ids = witnesses
         .iter()
-        .map(IdentityPublicDocument::identity_id)
+        .map(IdentityPublicDocument::identity_id_unchecked)
         .map(|result| result.map(principal_id))
         .collect::<Result<Vec<_>, _>>()?;
     let release = rebyte_contract::QuorumRelease::new(
@@ -1059,7 +1058,7 @@ pub fn approve_capsule(
     limits: &ChainLimits,
 ) -> Result<CapsuleApproval, ChainError> {
     proposal.validate(limits)?;
-    let group_id = proposal.group.group_id()?;
+    let group_id = proposal.group.group_id_unchecked()?;
     if proposal
         .group
         .proposal()
@@ -1094,7 +1093,7 @@ pub fn finalize_capsule(
     for approval in &approvals {
         approval.validate_shape()?;
     }
-    approvals.sort_by_key(|approval| approval.member_id().unwrap_or(IdentityId([0; 32])));
+    approvals.sort_by_cached_key(|approval| approval.member_id().unwrap_or(IdentityId([0; 32])));
     if approvals.windows(2).any(|pair| {
         pair.first().and_then(|item| item.member_id().ok())
             == pair.get(1).and_then(|item| item.member_id().ok())
@@ -1191,11 +1190,11 @@ fn decrypt_content(
         .iter()
         .find(|slot| {
             slot.holder
-                .identity_id()
+                .identity_id_unchecked()
                 .is_ok_and(|candidate| candidate == recipient_id)
         })
         .ok_or(ChainError::NotRecipient)?;
-    let group_id = envelope.proposal.group.group_id()?;
+    let group_id = envelope.proposal.group.group_id_unchecked()?;
     let core = proposal_core(
         &envelope.proposal.group,
         &envelope.proposal.contract,
@@ -1246,7 +1245,7 @@ pub(super) fn decrypt_payload_with_cek(
     if cek.len() != CEK_BYTES {
         return Err(ChainError::CryptographicFailure);
     }
-    let group_id = envelope.proposal.group.group_id()?;
+    let group_id = envelope.proposal.group.group_id_unchecked()?;
     let core = proposal_core(
         &envelope.proposal.group,
         &envelope.proposal.contract,
@@ -1304,11 +1303,11 @@ pub(super) fn unwrap_quorum_share(
         .iter()
         .find(|slot| {
             slot.holder
-                .identity_id()
+                .identity_id_unchecked()
                 .is_ok_and(|candidate| candidate == witness_id)
         })
         .ok_or(ChainError::NotWitness)?;
-    let group_id = envelope.proposal.group.group_id()?;
+    let group_id = envelope.proposal.group.group_id_unchecked()?;
     let core = proposal_core(
         &envelope.proposal.group,
         &envelope.proposal.contract,
@@ -1375,12 +1374,14 @@ pub(super) fn opened_content(decrypted: DecryptedContent) -> Result<OpenedConten
     }
 }
 
+// Callers must have validated the proposal that produced `group_id` on the
+// current data.
 fn verify_capsule_approval(
+    group_id: &GroupId,
     proposal: &CapsuleProposal,
     approval: &CapsuleApproval,
 ) -> Result<(), ChainError> {
     approval.validate_shape()?;
-    let group_id = proposal.group.group_id()?;
     let member_id = approval.member_id()?;
     if decode_array::<32>(&approval.group_id)? != group_id.0
         || decode_array::<32>(&approval.proposal_id)? != proposal.proposal_id
@@ -1396,19 +1397,20 @@ fn verify_capsule_approval(
         .map_err(|_| ChainError::InvalidPublicKey)?;
     verifying_key
         .verify_strict(
-            &approval_message(&group_id, &proposal.proposal_id, &member_id),
+            &approval_message(group_id, &proposal.proposal_id, &member_id),
             &Signature::from_bytes(&decode_array(&approval.signature)?),
         )
         .map_err(|_| ChainError::InvalidSignature)
 }
 
+// Callers must have validated `group` on the current data.
 fn proposal_core(
     group: &GroupCertificate,
     contract: &AccessContract,
     proposal_nonce: &[u8; 32],
     payload_nonce: &[u8; PAYLOAD_NONCE_BYTES],
 ) -> Result<Vec<u8>, ChainError> {
-    let group_id = group.group_id()?;
+    let group_id = group.group_id_unchecked()?;
     let group_digest = domain_hash(
         "Rebyte Chain group certificate digest v2 2026-07-18",
         &[&group.to_json()?],
@@ -1428,6 +1430,8 @@ fn proposal_core(
     Ok(core)
 }
 
+// Callers must have validated the proposal group and every slot holder on the
+// current data.
 fn calculate_proposal_id(proposal: &CapsuleProposal) -> Result<[u8; 32], ChainError> {
     let core = proposal_core(
         &proposal.group,
@@ -1437,7 +1441,7 @@ fn calculate_proposal_id(proposal: &CapsuleProposal) -> Result<[u8; 32], ChainEr
     )?;
     let mut slots = Vec::new();
     for slot in &proposal.slots {
-        slots.extend_from_slice(slot.holder.identity_id()?.as_bytes());
+        slots.extend_from_slice(slot.holder.identity_id_unchecked()?.as_bytes());
         slots.extend_from_slice(&slot.encapped_key);
         slots.extend_from_slice(&slot.wrapped_key);
     }
@@ -1578,16 +1582,24 @@ fn canonical_identities(
     for recipient in &recipients {
         recipient.validate()?;
     }
-    recipients.sort_by_key(|recipient| recipient.identity_id().unwrap_or(IdentityId([0; 32])));
+    recipients.sort_by_cached_key(|recipient| {
+        recipient
+            .identity_id_unchecked()
+            .unwrap_or(IdentityId([0; 32]))
+    });
     if recipients.windows(2).any(|pair| {
-        pair.first().and_then(|item| item.identity_id().ok())
-            == pair.get(1).and_then(|item| item.identity_id().ok())
+        pair.first()
+            .and_then(|item| item.identity_id_unchecked().ok())
+            == pair
+                .get(1)
+                .and_then(|item| item.identity_id_unchecked().ok())
     }) {
         return Err(ChainError::DuplicateIdentity);
     }
     Ok(recipients)
 }
 
+// Callers must have validated `group` on the current data.
 fn validate_contract_bindings(
     group: &GroupCertificate,
     contract: &AccessContract,
@@ -1601,7 +1613,7 @@ fn validate_contract_bindings(
     if contract_bytes.len() > MAX_ACCESS_CONTRACT_BYTES {
         return Err(ChainError::LimitExceeded);
     }
-    let group_id = group.group_id()?;
+    let group_id = group.group_id_unchecked()?;
     if contract.group_id() != PrincipalId::from_bytes(*group_id.as_bytes())
         || contract.seal_threshold() != group.capsule_threshold()
         || contract.content().digest() != content_digest
@@ -1613,7 +1625,7 @@ fn validate_contract_bindings(
         .proposal()
         .members()
         .iter()
-        .map(IdentityPublicDocument::identity_id)
+        .map(IdentityPublicDocument::identity_id_unchecked)
         .map(|result| result.map(principal_id))
         .collect::<Result<Vec<_>, _>>()?;
     let holders = holder_ids

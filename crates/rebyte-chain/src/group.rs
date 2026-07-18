@@ -103,6 +103,11 @@ impl GroupProposal {
     /// Returns [`ChainError`] when the proposal is invalid.
     pub fn group_id(&self) -> Result<GroupId, ChainError> {
         self.validate()?;
+        self.group_id_unchecked()
+    }
+
+    // Callers must have validated this proposal on the current data.
+    pub(crate) fn group_id_unchecked(&self) -> Result<GroupId, ChainError> {
         Ok(GroupId(decode_array(&self.group_id)?))
     }
 
@@ -124,10 +129,13 @@ impl GroupProposal {
         &self.members
     }
 
+    // Callers must have validated this proposal on the current data.
     pub(crate) fn member(&self, id: &IdentityId) -> Option<&IdentityPublicDocument> {
-        self.members
-            .iter()
-            .find(|member| member.identity_id().is_ok_and(|candidate| candidate == *id))
+        self.members.iter().find(|member| {
+            member
+                .identity_id_unchecked()
+                .is_ok_and(|candidate| candidate == *id)
+        })
     }
 
     pub(crate) fn validate(&self) -> Result<(), ChainError> {
@@ -146,7 +154,7 @@ impl GroupProposal {
         let mut previous = None;
         for member in &self.members {
             member.validate()?;
-            let identity_id = member.identity_id()?;
+            let identity_id = member.identity_id_unchecked()?;
             if previous.is_some_and(|value| value >= identity_id) {
                 return Err(if previous == Some(identity_id) {
                     ChainError::DuplicateIdentity
@@ -179,10 +187,17 @@ impl GroupProposal {
         for member in &members {
             member.validate()?;
         }
-        members.sort_by_key(|member| member.identity_id().unwrap_or(IdentityId([0; 32])));
+        members.sort_by_cached_key(|member| {
+            member
+                .identity_id_unchecked()
+                .unwrap_or(IdentityId([0; 32]))
+        });
         if members.windows(2).any(|pair| {
-            pair.first().and_then(|left| left.identity_id().ok())
-                == pair.get(1).and_then(|right| right.identity_id().ok())
+            pair.first()
+                .and_then(|left| left.identity_id_unchecked().ok())
+                == pair
+                    .get(1)
+                    .and_then(|right| right.identity_id_unchecked().ok())
         }) {
             return Err(ChainError::DuplicateIdentity);
         }
@@ -318,7 +333,12 @@ impl GroupCertificate {
     /// Returns [`ChainError`] if the certificate is invalid.
     pub fn group_id(&self) -> Result<GroupId, ChainError> {
         self.validate()?;
-        self.proposal.group_id()
+        self.proposal.group_id_unchecked()
+    }
+
+    // Callers must have validated this certificate on the current data.
+    pub(crate) fn group_id_unchecked(&self) -> Result<GroupId, ChainError> {
+        self.proposal.group_id_unchecked()
     }
 
     /// Returns the verified capsule approval threshold.
@@ -341,8 +361,9 @@ impl GroupCertificate {
         if self.acceptances.len() != self.proposal.members.len() {
             return Err(ChainError::IncompleteGroup);
         }
+        let group_id = self.proposal.group_id_unchecked()?;
         for (member, acceptance) in self.proposal.members.iter().zip(&self.acceptances) {
-            verify_acceptance(&self.proposal, member, acceptance)?;
+            verify_acceptance(&group_id, member, acceptance)?;
         }
         Ok(())
     }
@@ -362,7 +383,7 @@ pub fn accept_group(
     if proposal.member(&identity.identity_id()).is_none() {
         return Err(ChainError::NotGroupMember);
     }
-    let group_id = proposal.group_id()?;
+    let group_id = proposal.group_id_unchecked()?;
     let message = acceptance_message(&group_id, &identity.identity_id());
     Ok(GroupAcceptance {
         schema_version: DOCUMENT_VERSION,
@@ -387,7 +408,8 @@ pub fn finalize_group(
     for acceptance in &acceptances {
         acceptance.validate_shape()?;
     }
-    acceptances.sort_by_key(|acceptance| acceptance.member_id().unwrap_or(IdentityId([0; 32])));
+    acceptances
+        .sort_by_cached_key(|acceptance| acceptance.member_id().unwrap_or(IdentityId([0; 32])));
     if acceptances.windows(2).any(|pair| {
         pair.first().and_then(|item| item.member_id().ok())
             == pair.get(1).and_then(|item| item.member_id().ok())
@@ -404,14 +426,15 @@ pub fn finalize_group(
     Ok(certificate)
 }
 
+// Callers must have validated the proposal that produced `group_id` and every
+// listed member on the current data.
 fn verify_acceptance(
-    proposal: &GroupProposal,
+    group_id: &GroupId,
     member: &IdentityPublicDocument,
     acceptance: &GroupAcceptance,
 ) -> Result<(), ChainError> {
     acceptance.validate_shape()?;
-    let group_id = proposal.group_id()?;
-    let member_id = member.identity_id()?;
+    let member_id = member.identity_id_unchecked()?;
     if decode_array::<32>(&acceptance.group_id)? != group_id.0
         || acceptance.member_id()? != member_id
     {
@@ -421,12 +444,13 @@ fn verify_acceptance(
         .map_err(|_| ChainError::InvalidPublicKey)?;
     public_key
         .verify_strict(
-            &acceptance_message(&group_id, &member_id),
+            &acceptance_message(group_id, &member_id),
             &Signature::from_bytes(&decode_array(&acceptance.signature)?),
         )
         .map_err(|_| ChainError::InvalidSignature)
 }
 
+// Callers must have validated every listed member on the current data.
 fn calculate_group_id(
     display_name: &str,
     nonce: &[u8; 32],
@@ -442,7 +466,7 @@ fn calculate_group_id(
     put_u16(&mut body, capsule_threshold);
     put_u16(&mut body, member_count);
     for member in members {
-        let member_bytes = member.canonical_member_bytes()?;
+        let member_bytes = member.canonical_member_bytes_unchecked()?;
         put_u32(
             &mut body,
             u32::try_from(member_bytes.len()).map_err(|_| ChainError::LengthOverflow)?,
