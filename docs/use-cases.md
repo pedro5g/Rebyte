@@ -133,6 +133,37 @@ five-member group uses `--threshold 4`. This controls how many officers
 authorize the encrypted proposal. It does not require four officers to return
 each time Customer opens the already finalized envelope.
 
+## Embargoed or witness-gated delivery
+
+Use quorum release when the encrypted capsule may be distributed now but its
+CEK must remain split until a fresh recipient request satisfies independent
+witnesses:
+
+```console
+rebyte chain capsule create \
+  --group release-officers.group.json \
+  --artifact confidential.rba \
+  --recipient customer.public.json \
+  --witness officer-a.public.json \
+  --witness officer-b.public.json \
+  --release-threshold 2 \
+  --not-before 2026-08-01T12:00:00Z \
+  --maximum-releases 1 \
+  --output embargo.proposal.rbep
+```
+
+After the normal group approval/finalization ceremony, Customer creates one
+`chain release request`; each officer runs `chain release grant` on its own
+protected witness host; Customer supplies both grants to `chain release open`.
+For an 80% opening policy without a finite release limit, choose
+`T = ceil(0.8 * N)`. A finite maximum currently requires `T = N` so partially
+overlapping quorums cannot authorize different concurrent requests.
+
+This controls fresh key-release sessions, not later use of bytes already
+released. A recipient that retains every grant, the CEK or plaintext can replay
+it. Strong witness time/count guarantees also require rollback-protected clocks
+and ledgers.
+
 ## Signed configuration baseline
 
 Package non-secret configuration that must be byte-identical across machines.

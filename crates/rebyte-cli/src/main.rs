@@ -7,6 +7,7 @@ mod file_token_command;
 mod hash_command;
 mod keys;
 mod producer;
+mod release_ledger;
 mod security_io;
 mod semantic_command;
 mod shell_env;

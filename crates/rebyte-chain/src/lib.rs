@@ -16,11 +16,15 @@ mod envelope;
 mod error;
 mod group;
 mod identity;
+mod release;
+mod secret_sharing;
 
 pub use envelope::{
     CAPSULE_TOKEN_PREFIX, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainLimits,
-    OpenedCapsule, OpenedSemanticPatch, approve_capsule, create_capsule_proposal,
-    create_capsule_proposal_with_contract, create_content_proposal_with_contract,
+    OpenedCapsule, OpenedContent, OpenedSemanticPatch, QuorumProposalOptions, approve_capsule,
+    create_capsule_proposal, create_capsule_proposal_with_contract,
+    create_content_proposal_with_contract, create_quorum_capsule_proposal,
+    create_quorum_content_proposal_with_contract, create_quorum_semantic_patch_proposal,
     create_semantic_patch_proposal, finalize_capsule, open_capsule, open_semantic_patch,
 };
 pub use error::ChainError;
@@ -34,6 +38,10 @@ pub use identity::{
 pub use rebyte_contract::{
     AccessContract, AccessContractBuilder, Capabilities, Capability, ContentCommitment,
     ContentKind, ContractError, ContractId, PrincipalId, QuorumRelease, ReleasePolicy,
+};
+pub use release::{
+    MemoryReleaseLedger, ReleaseAuthorization, ReleaseGrant, ReleaseLedger, ReleaseRequest,
+    TrustedClock, create_release_request, grant_release, open_quorum_content,
 };
 
 #[cfg(test)]

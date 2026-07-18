@@ -291,6 +291,14 @@ rebyte chain capsule create --group GROUP.json --artifact ARTIFACT.rba
 rebyte chain capsule create --group GROUP.json --patch PATCH.json
   --recipient ALICE.public.json
   --output PATCH.proposal.rbep [--json]
+
+rebyte chain capsule create --group GROUP.json --artifact ARTIFACT.rba
+  --recipient READER.public.json
+  --witness ALICE.public.json --witness BOB.public.json
+  --release-threshold 2
+  --not-before 2026-08-01T12:00:00Z
+  [--maximum-releases 1]
+  --output TIMED.proposal.rbep [--json]
 ```
 
 Exactly one input is required. `--artifact` accepts a canonical `.rba` produced
@@ -300,11 +308,17 @@ fresh 256-bit content-encryption key, encrypts it once with XChaCha20-Poly1305
 and wraps that same key independently to every recipient using RFC 9180 HPKE.
 Recipients are sorted, unique and limited to 64.
 
-Rebyte also creates a direct-release Access Contract that binds the complete
+Without witnesses, Rebyte creates a direct-release Access Contract that binds the complete
 group controller set, sealing threshold, content kind/digest/length, recipient
 identities and the exact-artifact or semantic-patch capabilities. The resulting
 `ProposalId` commits that contract, the group certificate, HPKE slots and
 ciphertext digest. A group member is not implicitly a recipient.
+
+With one or more `--witness` values, Rebyte creates a quorum contract and
+HPKE-wraps one Shamir CEK share per witness. `--release-threshold` defaults to
+all witnesses. `--not-before` accepts RFC 3339 with an explicit offset or
+non-negative Unix milliseconds. A finite `--maximum-releases` requires the
+threshold to equal the witness count.
 
 ### `chain capsule approve`
 
@@ -368,7 +382,7 @@ reconstructing its contents.
 Each explicitly listed recipient can open independently after finalization.
 The capsule threshold authorizes creation of the envelope; envelope v2 direct
 release does not require fresh member participation for every open. Time and
-maximum-release policies are rejected until quorum release is implemented.
+maximum-release policies use the separate `chain release` ceremony below.
 
 ### `chain capsule diff`
 
@@ -417,6 +431,72 @@ are verified before the target is read. Patch preconditions and `test`
 operations run before preview; commit revalidates the original digest, stages
 beside the target, atomically replaces it and hashes the committed result.
 `--backup` preserves the exact original bytes as `<target>.rebyte.bak`.
+
+### `chain release request`
+
+```text
+rebyte chain release request --file CAPSULE.rbe
+  --private-key RECIPIENT.rbk [--passphrase-file PATH]
+  --output REQUEST.json [--json]
+```
+
+Verifies the quorum capsule, confirms that the identity is a contract
+recipient, generates a fresh 256-bit nonce and signs a request bound to the
+exact envelope, proposal and contract. Send the same request and capsule to
+each selected witness.
+
+### `chain release grant`
+
+```text
+rebyte chain release grant --file CAPSULE.rbe
+  --request REQUEST.json
+  --private-key WITNESS.rbk [--passphrase-file PATH]
+  --ledger WITNESS.ledger
+  --acknowledge-local-authority
+  --output WITNESS.grant.json [--json]
+```
+
+Verifies every binding and signature, checks the contract release time against
+the witness OS clock, unwraps only that witness's share and atomically records
+the request in a locked append-only ledger. The share is HPKE-encrypted to the
+requesting recipient and the grant is signed by the witness.
+
+`--acknowledge-local-authority` is mandatory because an ordinary OS clock and
+local file are not intrinsically rollback-resistant. This command is strong
+only when the witness host protects both. Production applications should
+implement the Rust `TrustedClock` and `ReleaseLedger` interfaces with
+hardware-backed or independently operated authority state.
+
+### `chain release open`
+
+```text
+rebyte chain release open --file CAPSULE.rbe
+  --request REQUEST.json
+  --grant ALICE.grant.json --grant BOB.grant.json
+  --private-key RECIPIENT.rbk [--passphrase-file PATH]
+  --output FILE_OR_DIRECTORY [--raw-artifact] [--json]
+```
+
+Requires exactly the contract threshold of unique witness grants. Rebyte
+verifies their signatures, request bindings, observed times, ordinals and
+share coordinates before reconstructing the CEK. Payload and artifact
+verification then follows the normal strict path.
+
+### `chain release patch`
+
+```text
+rebyte chain release patch --file PATCH.rbe
+  --request REQUEST.json
+  --grant ALICE.grant.json --grant BOB.grant.json
+  --private-key RECIPIENT.rbk [--passphrase-file PATH]
+  --target CONFIG.json [--dry-run | --yes] [--backup] [--json]
+```
+
+Performs the same quorum verification and then routes canonical patch content
+through semantic preconditions, preview, confirmation, backup and atomic
+replacement. A finite release allowance limits new witness-authorized
+requests; it cannot prevent replay of grants or plaintext already retained by
+the authorized recipient.
 
 ## Consumer commands
 

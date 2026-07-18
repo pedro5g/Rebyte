@@ -15,8 +15,14 @@ and releases follow Semantic Versioning.
   payload and RFC 9180 HPKE content-key slots for multiple recipients.
 - Canonical `rc1_` Access Contracts binding controllers, thresholds,
   recipients, capabilities, exact content and direct or quorum key release.
-- Fail-closed Chain v2 contract integration; unsupported quorum, temporal and
-  maximum-release policies cannot degrade into local clock/counter checks.
+- Interactive Chain v2 quorum release with bounded Shamir CEK shares, fresh
+  recipient-signed requests, witness-signed HPKE grants and exact threshold
+  reconstruction.
+- RFC 3339/Unix-millisecond release gates and unanimous finite release
+  allowances through pluggable `TrustedClock` and `ReleaseLedger` authorities.
+- A locked, append-only, BLAKE3-chained cooperative witness ledger with
+  idempotent requests, crash-tail recovery and explicit local-authority
+  acknowledgement.
 - Contract-gated `chain capsule diff` and recoverable `chain capsule apply`
   commands, sharing the RAP transaction engine and preserving explicit empty
   directories through journaled creation and rollback.
@@ -26,6 +32,8 @@ and releases follow Semantic Versioning.
 - Complete `rebyte chain identity`, `chain group` and `chain capsule` CLI
   workflows, stable JSON reports and byte-exact file/directory integration
   coverage.
+- Complete `chain release request|grant|open|patch` CLI workflow, including
+  denial before the release time and after a fresh-session allowance is spent.
 - A bounded Chain-envelope fuzz target and scheduled parser fuzzing.
 
 ### Fixed
@@ -40,8 +48,8 @@ and releases follow Semantic Versioning.
 
 - Specify the implemented Chain v2 and Access Contract v1 wire formats,
   security boundary, CLI, Rust API, modular layer diagram and multi-party flow;
-  retain quorum release and the signed Merkle event history as explicit
-  roadmap layers.
+  retain hardware authority adapters and the signed Merkle event history as
+  explicit roadmap layers.
 
 ## [1.2.0] - 2026-07-17
 

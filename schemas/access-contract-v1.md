@@ -2,10 +2,9 @@
 
 Copyright (c) 2026 Pedro Martins (pedro5g)
 
-Status: the canonical contract types and codec are implemented. Direct
-recipient release is implemented by Chain envelope v2. Quorum release is
-specified but rejected by the envelope until an independently reviewed,
-interactive key-share protocol is implemented.
+Status: the canonical contract types and codec are implemented. Chain envelope
+v2 implements direct recipient release and interactive quorum release. The
+cryptographic implementation has not received an independent audit.
 
 ## Purpose
 
@@ -146,12 +145,22 @@ QuorumRelease {
 Each optional field begins with `0` for absent or `1` followed by its value.
 Other tags are invalid. A maximum release count must be greater than zero.
 The release threshold satisfies `1 <= T <= witness_count`.
+When a maximum release count is present, v1 additionally requires
+`T = witness_count`. This prevents two different concurrent requests from
+being authorized by partially overlapping quorums when no shared consensus
+ledger exists.
 
 Unix milliseconds are used because they are interoperable and sufficient for
 authorization UX. More decimal precision does not make time more trustworthy.
 Witnesses must obtain time from a documented trusted source, authenticate
 fresh release requests and durably coordinate consumption of release
 allowances.
+
+Chain v2 uses a fresh signed `RequestId`, one independently signed grant per
+witness and Shamir shares encrypted to the requesting recipient with HPKE.
+The native CLI provides a cooperative append-only local ledger, but strong
+rollback resistance requires a trusted external or hardware-backed
+implementation of the `TrustedClock` and `ReleaseLedger` interfaces.
 
 `maximum_successful_releases = 1` means witnesses authorize at most one fresh
 content-key release event. It does not mean an already authorized recipient
@@ -166,11 +175,12 @@ Decoders reject:
   bits;
 - zero, duplicate, oversized or non-canonically ordered participant sets;
 - invalid thresholds and zero release limits;
+- a finite release limit without unanimous witnesses;
 - incompatible content/capability combinations;
 - truncation, trailing bytes, non-canonical Base64URL and oversized input;
 - any mismatch between the stored `ContractId` and canonical body.
 
 The Chain v2 binding additionally rejects a contract whose group, controllers,
 threshold, recipients, content kind, digest or length differs from the
-proposal. Unsupported release policies return a policy error before any
-plaintext or content key is exposed.
+proposal. Unsupported or unavailable release authorities return a policy error
+before any plaintext or content key is exposed.

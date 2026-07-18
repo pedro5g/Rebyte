@@ -44,6 +44,12 @@ pub(crate) type HpkePublicKey = <ChainKem as hpke::Kem>::PublicKey;
 pub struct IdentityId(pub(crate) [u8; 32]);
 
 impl IdentityId {
+    /// Creates an identity identifier from exact protocol bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Returns the binary 32-byte identity.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {

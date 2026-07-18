@@ -438,6 +438,183 @@ fn consensus_capsule_reconstructs_directory_exactly() -> Result<(), Box<dyn std:
         fs::read(source.join("binary.dat"))?
     );
     assert!(restored.join("empty").is_dir());
+
+    let quorum_proposal = directory.path().join("timed.rbep");
+    let quorum_approval = directory.path().join("timed.rbca.json");
+    let quorum_capsule = directory.path().join("timed.rbe");
+    let release_request = directory.path().join("timed.request.json");
+    let release_grant = directory.path().join("timed.grant.json");
+    let release_ledger = directory.path().join("witness.ledger");
+    let quorum_restored = directory.path().join("quorum-restored");
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "capsule",
+                "create",
+                "--group",
+                path_text(&group)?,
+                "--artifact",
+                path_text(&artifact)?,
+                "--recipient",
+                path_text(&public)?,
+                "--witness",
+                path_text(&public)?,
+                "--release-threshold",
+                "1",
+                "--not-before",
+                "1970-01-01T00:00:00Z",
+                "--maximum-releases",
+                "1",
+                "--output",
+                path_text(&quorum_proposal)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "capsule",
+                "approve",
+                path_text(&quorum_proposal)?,
+                "--private-key",
+                path_text(&private)?,
+                "--passphrase-file",
+                path_text(&passphrase)?,
+                "--output",
+                path_text(&quorum_approval)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "capsule",
+                "finalize",
+                path_text(&quorum_proposal)?,
+                "--approval",
+                path_text(&quorum_approval)?,
+                "--output",
+                path_text(&quorum_capsule)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "release",
+                "request",
+                "--file",
+                path_text(&quorum_capsule)?,
+                "--private-key",
+                path_text(&private)?,
+                "--passphrase-file",
+                path_text(&passphrase)?,
+                "--output",
+                path_text(&release_request)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "release",
+                "grant",
+                "--file",
+                path_text(&quorum_capsule)?,
+                "--request",
+                path_text(&release_request)?,
+                "--private-key",
+                path_text(&private)?,
+                "--passphrase-file",
+                path_text(&passphrase)?,
+                "--ledger",
+                path_text(&release_ledger)?,
+                "--acknowledge-local-authority",
+                "--output",
+                path_text(&release_grant)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "release",
+                "open",
+                "--file",
+                path_text(&quorum_capsule)?,
+                "--request",
+                path_text(&release_request)?,
+                "--grant",
+                path_text(&release_grant)?,
+                "--private-key",
+                path_text(&private)?,
+                "--passphrase-file",
+                path_text(&passphrase)?,
+                "--output",
+                path_text(&quorum_restored)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    assert_eq!(
+        fs::read(quorum_restored.join("message.txt"))?,
+        fs::read(source.join("message.txt"))?
+    );
+
+    let second_request = directory.path().join("second.request.json");
+    let forbidden_grant = directory.path().join("second.grant.json");
+    assert_success(
+        &rebyte()
+            .args([
+                "chain",
+                "release",
+                "request",
+                "--file",
+                path_text(&quorum_capsule)?,
+                "--private-key",
+                path_text(&private)?,
+                "--passphrase-file",
+                path_text(&passphrase)?,
+                "--output",
+                path_text(&second_request)?,
+                "--json",
+            ])
+            .output()?,
+    );
+    let rejected = rebyte()
+        .args([
+            "chain",
+            "release",
+            "grant",
+            "--file",
+            path_text(&quorum_capsule)?,
+            "--request",
+            path_text(&second_request)?,
+            "--private-key",
+            path_text(&private)?,
+            "--passphrase-file",
+            path_text(&passphrase)?,
+            "--ledger",
+            path_text(&release_ledger)?,
+            "--acknowledge-local-authority",
+            "--output",
+            path_text(&forbidden_grant)?,
+            "--json",
+        ])
+        .output()?;
+    assert_eq!(rejected.status.code(), Some(7));
+    assert!(!forbidden_grant.exists());
     Ok(())
 }
 

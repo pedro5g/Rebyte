@@ -2,9 +2,8 @@
 
 Status: Chain envelope v2 and Access Contract v1 are implemented by
 `rebyte-contract`, `rebyte-chain`, `rebyte-core` and the `rebyte chain` CLI.
-Direct recipient release is functional. The later signed event graph and
-interactive quorum release described as roadmap are not implemented by
-envelope v2.
+Direct and interactive witness-quorum release are functional. The signed event
+graph and hardware/external trusted-authority adapters remain roadmap.
 
 Rebyte Chain is a local-first, self-custodied system for sharing byte-exact
 Rebyte artifacts with explicit cryptographic authorization and recipients. The
@@ -40,6 +39,9 @@ Chain envelope v2 provides:
   content kinds;
 - canonical binary `.rbe`, textual `rbe2_` and strict control documents;
 - native Rust and CLI APIs with no network dependency.
+- Shamir `T-of-N` CEK shares, fresh recipient-signed requests and
+  witness-signed HPKE grants;
+- witness-enforced release dates and unanimous finite release allowances.
 
 Envelope v2 does not provide:
 
@@ -50,8 +52,7 @@ Envelope v2 does not provide:
 - anonymity against traffic analysis, file-size analysis or a malicious
   application origin;
 - automatic semantic merging of file contents;
-- threshold approval at every open, threshold secret sharing, FROST, MLS,
-  hardware enclaves or a network relay;
+- threshold signatures, FROST, MLS, hardware enclaves or a network relay;
 - the signed Merkle event graph or a Chain WebAssembly storage API.
 
 Semantic patches remain a separate, non-executable content type and can be
@@ -71,7 +72,7 @@ flowchart TB
     A[Artifact layer<br/>ra1_ / .rba<br/>compression + exact integrity]
     P[Publisher layer<br/>rb1_ / .rbc<br/>Ed25519 authenticity + trust policy]
     C[Chain v2 direct release<br/>rbe2_ / .rbe<br/>group consensus + confidentiality]
-    Q[Quorum release<br/>fresh witnesses + trusted time/state<br/>specified, not implemented]
+    Q[Quorum release<br/>fresh witnesses + trusted time/state<br/>implemented]
 
     S --> A
     A --> P
@@ -198,11 +199,16 @@ automatically a recipient, and a recipient is not automatically allowed to
 approve. This distinction permits, for example, two release officers to
 authorize encrypted delivery to ten customer identities.
 
-If a product requires `T-of-N` cooperation at every open, the CEK must instead
-be split by a reviewed threshold secret-sharing construction and exchanged in
-a fresh, replay-resistant opening session. That protocol is not present in
-envelope v2. Signatures alone cannot enforce it, and Rebyte does not label
-capsule-finalization approvals as opening shares.
+Quorum contracts split the random CEK with Shamir sharing over GF(256). Every
+witness receives only one HPKE-protected share. A recipient signs a fresh
+request bound to the exact envelope and receives `T` independently signed
+grants, each re-encrypting one share to that recipient. Capsule-finalization
+approvals and release grants remain separate decisions.
+
+The implementation is fail-closed and bounded, but has not received an
+independent cryptographic audit. A malformed or dishonest share can deny
+availability; it cannot produce accepted plaintext because the payload AEAD
+and exact content commitment are checked after interpolation.
 
 FROST, specified
 by [RFC 9591](https://www.rfc-editor.org/rfc/rfc9591), can later make one
@@ -231,11 +237,13 @@ flowchart LR
     T -->|too early / allowance consumed| X
 ```
 
-Envelope v2 implements the upper direct branch and rejects the quorum branch.
-It never substitutes the local wall clock or a local counter for the missing
-witness protocol.
+Envelope v2 implements both branches. The Rust API requires explicit
+`TrustedClock` and `ReleaseLedger` providers. The native CLI offers a
+cooperative OS-clock/append-only-file provider only after
+`--acknowledge-local-authority`; it is not rollback-resistant unless the
+witness host supplies that property.
 
-## Implemented flow
+## Implemented direct-release flow
 
 ```mermaid
 sequenceDiagram
@@ -265,15 +273,43 @@ sequenceDiagram
     R->>R: Reconstruct exact tree or atomically apply patch
 ```
 
-The data and authorization paths meet only in the finalized envelope:
+## Implemented quorum-release flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Capsule coordinator
+    participant W1 as Witness 1
+    participant W2 as Witness 2
+    participant R as Authorized recipient
+
+    C->>C: Generate CEK and encrypt canonical content once
+    C->>C: Shamir split CEK into N shares with threshold T
+    C->>W1: Envelope contains HPKE share slot for W1
+    C->>W2: Envelope contains HPKE share slot for W2
+    R->>R: Verify envelope and sign fresh RequestId
+    R-->>W1: Same request + envelope
+    R-->>W2: Same request + envelope
+    W1->>W1: Verify recipient, trusted time and durable allowance
+    W2->>W2: Verify recipient, trusted time and durable allowance
+    W1-->>R: Signed HPKE grant bound to RequestId
+    W2-->>R: Signed HPKE grant bound to RequestId
+    R->>R: Verify T unique grants and witness coordinates
+    R->>R: Interpolate CEK, authenticate payload and content
+    R->>R: Reconstruct exact tree or atomically apply patch
+```
+
+The data and authorization paths meet only in the finalized envelope and a
+fresh quorum session:
 
 ```mermaid
 flowchart LR
     F[File, directory or semantic patch] --> A[Canonical protected content]
     A --> E[XChaCha20-Poly1305<br/>one payload ciphertext]
     K[Fresh random CEK] --> E
-    K --> H1[HPKE slot · recipient 1]
-    K --> H2[HPKE slot · recipient 2..N]
+    K --> H1[Direct: HPKE CEK slots]
+    K --> SS[Quorum: Shamir T-of-N]
+    SS --> H2[HPKE witness share slots]
 
     P[Public identities + threshold] --> G[Unanimous GroupCertificate]
     G --> C[Canonical AccessContract]
@@ -284,6 +320,7 @@ flowchart LR
     H2 --> Q
     Q --> S[T unique Ed25519 approvals]
     S --> R[Final .rbe / rbe2_]
+    R --> O[Fresh RequestId + T signed grants]
 ```
 
 ## Signed Merkle event graph
@@ -375,12 +412,16 @@ No plaintext reaches a destination until all applicable stages succeed:
    public identity proof.
 3. Recompute the `GroupId` and verify unanimous group formation.
 4. Recompute the `ProposalId` and verify at least `T` unique group approvals.
-5. Match the opener to one exact recipient slot.
-6. HPKE-decapsulate the CEK without exposing it in output or errors.
-7. Authenticate and decrypt the payload in bounded memory.
-8. Verify exact length and the domain-separated protected-content digest.
-9. Select the strict `.rba` or Semantic Patch v1 decoder from the contract.
-10. Reconstruct through the no-symlink artifact decoder, or apply the patch
+5. Match direct release to one recipient CEK slot, or verify a fresh
+   recipient-signed quorum request.
+6. For quorum release, verify `T` unique witness signatures, time decisions,
+   ledger ordinals and share coordinates.
+7. HPKE-decapsulate the CEK or shares and interpolate the CEK without exposing
+   key material in output or errors.
+8. Authenticate and decrypt the payload in bounded memory.
+9. Verify exact length and the domain-separated protected-content digest.
+10. Select the strict `.rba` or Semantic Patch v1 decoder from the contract.
+11. Reconstruct through the no-symlink artifact decoder, or apply the patch
     through semantic preconditions, preview, confirmation, atomic replacement
     and post-write hashing.
 
@@ -414,6 +455,7 @@ group ratchet.
 rebyte chain identity generate|inspect
 rebyte chain group create|accept|finalize|inspect
 rebyte chain capsule create|approve|finalize|inspect|open|diff|apply
+rebyte chain release request|grant|open|patch
 ```
 
 Every output is created exclusively and never replaces an existing path. JSON
@@ -428,7 +470,8 @@ Completed gates:
 
 1. separate self-proving Ed25519/X25519 identities and encrypted `.rbk`;
 2. unanimous group formation bound to every original public identity;
-3. RFC 9180 HPKE recipient slots and authenticated payload encryption;
+3. RFC 9180 HPKE direct CEK/witness-share slots and authenticated payload
+   encryption;
 4. one ciphertext for canonical multi-recipient delivery;
 5. exact-proposal `T-of-N` approvals with duplicate and replay rejection;
 6. native Rust facade, complete CLI workflow and end-to-end reconstruction;
@@ -438,14 +481,17 @@ Completed gates:
    preconditions, backup and atomic application;
 9. mutation, representative truncation, wrong-key, threshold and fuzz-harness
    coverage.
+10. fresh signed release requests, witness-signed HPKE grants, Shamir
+    reconstruction, trusted-time gates and append-only release ledgers.
 
 Remaining independent gates:
 
 1. independent cryptographic review and stable cross-language vectors;
-2. session-bound threshold opening with reviewed secret sharing;
-3. signed Merkle DAG, offline fork/merge and revocation semantics;
-4. read-only WASM codecs and encrypted IndexedDB repository;
-5. PWA only after native and WASM vectors match byte for byte.
+2. independent review of the session-bound threshold implementation;
+3. hardware/KMS trusted-clock and monotonic-ledger adapters;
+4. signed Merkle DAG, offline fork/merge and revocation semantics;
+5. read-only WASM codecs and encrypted IndexedDB repository;
+6. PWA only after native and WASM vectors match byte for byte.
 
 Each gate requires canonical round trips, mutation and truncation rejection,
 wrong-key indistinguishability, nonce-uniqueness checks, threshold boundary

@@ -21,6 +21,9 @@ threshold must then sign the exact encrypted capsule proposal before it becomes
 a portable `.rbe` or `rbe2_` capsule. Its canonical Access Contract binds the
 group, content, recipients, capabilities and key-release policy. Only
 explicitly listed recipient identities can decrypt a direct-release capsule.
+Quorum release keeps the content key split between witnesses until a fresh
+recipient-signed request satisfies their threshold, trusted-time and durable
+allowance decisions.
 
 Chain is deliberately not a cryptocurrency or global-consensus blockchain.
 The implemented envelope, its precise authorization boundary and the future
@@ -40,6 +43,7 @@ which restrictions are cryptographically enforceable.
 - self-custodied Ed25519/X25519 identities and encrypted group capsules;
 - canonical contracts that bind authorization to exact encrypted content;
 - unanimous group formation plus configurable capsule approval thresholds;
+- fresh `T-of-N` witness release with encrypted Shamir shares and signed grants;
 - portable paths, bounded decompression and strict rejection of symlinks;
 - dry-run diffs, per-file atomic replacement and recoverable transactions;
 - Linux, macOS, Windows and browser-safe structural WebAssembly APIs.
@@ -303,9 +307,54 @@ rebyte chain capsule patch --file emergency.rbe \
 
 Capsule approval authorizes creation of that exact envelope; it is not a fresh
 approval ceremony every time a listed recipient opens it. Chain v2 direct
-release rejects time and single-release restrictions. Such conditions belong
-to the quorum-release contract and require fresh, stateful witness cooperation;
-that release mechanism is specified but not yet implemented.
+release rejects time and release-count restrictions. Use quorum release when
+each opening session must obtain fresh witness cooperation:
+
+```console
+rebyte chain capsule create \
+  --group owners.group.json \
+  --artifact project.rba \
+  --recipient alice.public.json \
+  --witness alice.public.json \
+  --witness bob.public.json \
+  --release-threshold 2 \
+  --not-before 2026-08-01T12:00:00Z \
+  --maximum-releases 1 \
+  --output timed.proposal.rbep
+
+# Approve and finalize timed.proposal.rbep exactly as above.
+rebyte chain release request --file timed.rbe \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --output timed.request.json
+
+# Run once on each independently protected witness host:
+rebyte chain release grant --file timed.rbe \
+  --request timed.request.json \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --ledger alice.release-ledger \
+  --acknowledge-local-authority \
+  --output alice.grant.json
+
+rebyte chain release grant --file timed.rbe \
+  --request timed.request.json \
+  --private-key bob.rbk --passphrase-file bob.passphrase \
+  --ledger bob.release-ledger \
+  --acknowledge-local-authority \
+  --output bob.grant.json
+
+rebyte chain release open --file timed.rbe \
+  --request timed.request.json \
+  --grant alice.grant.json --grant bob.grant.json \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --output ./project-restored
+```
+
+The CLI witness uses the OS clock and a locked, append-only local ledger; the
+flag makes that trust boundary explicit. It is rollback-resistant only when
+the witness host/storage is. `maximum-releases 1` permits one fresh request,
+not magical deletion: retained grants, keys or plaintext can still be replayed
+by an authorized recipient. Production authority providers implement the Rust
+`TrustedClock` and `ReleaseLedger` traits.
 
 ## CLI overview
 
@@ -326,6 +375,7 @@ use terminal-aware color; redirected output and `NO_COLOR` remain plain.
 | `chain identity` | Generate or inspect a self-custodied signing/encryption identity |
 | `chain group` | Create, accept, finalize or inspect a consensus group |
 | `chain capsule` | Encrypt, approve, finalize, inspect or open a group capsule |
+| `chain release` | Request and satisfy threshold/time-gated content release |
 | `inspect` | Parse bounded metadata; unverified data is labelled as such |
 | `verify` | Verify encoding, publisher, signature, payload and every file |
 | `diff` | Compare a verified capsule with a root without writing |

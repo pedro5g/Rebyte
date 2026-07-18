@@ -84,16 +84,31 @@ then reuse the capability-confined transaction engine. Empty directories are
 journaled before creation; file staging, precondition checks, per-file renames,
 post-write verification and rollback retain the same guarantees as signed RAP.
 
-The capsule threshold authorizes envelope creation. Direct release is not a threshold
-secret-sharing scheme and does not require members to approve every future
-open. Every explicitly listed recipient can decrypt independently. This
-distinction is part of the v2 security contract.
+The capsule threshold authorizes envelope creation. Direct release is not a
+threshold secret-sharing scheme and does not require members to approve every
+future open. Every explicitly listed recipient can decrypt independently.
 
-Time and maximum-release fields exist only in a quorum-release contract.
-Envelope v2 rejects that policy until an interactive witness protocol exists;
-it never treats the local clock or a restorable local counter as trusted.
-Even a valid single key release cannot force a recipient to delete retained
-plaintext or key material.
+For quorum release, the CEK is split into `N` Shamir shares over GF(256) with
+threshold `T`; each witness receives one share under a distinct HPKE context.
+The recipient signs a fresh envelope-bound request. A witness validates that
+request, recipient, trusted time and release allowance, unwraps only its share,
+atomically records the request, encrypts the share to the recipient and signs
+the complete grant. Opening requires exactly `T` unique valid grants, verifies
+the canonical witness coordinate of every share, reconstructs the CEK and then
+repeats payload AEAD, digest, length and content decoding.
+
+Finite maximum-release policies require every witness (`T = N`). A repeated
+request is idempotent; a different request consumes another allowance. The
+native append-only ledger uses an advisory lock, chained BLAKE3 records,
+`fsync` and restrictive permissions. It fails closed on mutation and safely
+trims only an incomplete final crash record.
+
+That local provider is cooperative, not an independent source of trusted time
+or rollback-proof state. The CLI requires `--acknowledge-local-authority`.
+Production deployments must back the `TrustedClock` and `ReleaseLedger` traits
+with protected witness hosts, secure time and monotonic state. Even a valid
+single release cannot force a recipient to delete retained grants, plaintext
+or key material; replaying an already granted session remains possible.
 
 ## Semantic patch boundary
 

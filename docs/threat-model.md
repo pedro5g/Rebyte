@@ -13,7 +13,9 @@ make no authenticity claim.
 Chain additionally protects encrypted `.rba` confidentiality from parties that
 do not possess an explicitly listed recipient private identity. It
 authenticates unanimous group formation and the configured threshold of member
-approvals for one exact encrypted proposal.
+approvals for one exact encrypted proposal. Quorum release additionally keeps
+the CEK unavailable until a listed recipient obtains the configured number of
+fresh, signed witness shares.
 
 ## Trust boundaries
 
@@ -24,6 +26,9 @@ approvals for one exact encrypted proposal.
 - Signing keys and KMS credentials are outside the CLI, Wasm module and RAP.
 - Chain `.rbk` identities and passphrases are controlled by their individual
   owners; public identities and exchanged approvals are hostile until verified.
+- Each quorum witness is an independent authority for its private share,
+  trusted time and durable release ledger. The native file ledger inherits the
+  rollback resistance of its host and storage.
 - The operating system, filesystem and Rust dependencies are trusted only to
   the degree documented in the security model.
 
@@ -39,7 +44,10 @@ For Chain, the attacker may also substitute a public encryption key, claim
 another member slot with the wrong private key, duplicate or reorder members,
 recipients and approvals, replay an approval against another proposal, remove
 a recipient, mutate an HPKE slot or encrypted payload, supply a wrong
-passphrase or attempt to open as an unlisted identity.
+passphrase or attempt to open as an unlisted identity. Against quorum release,
+the attacker may replay or rebind requests/grants, duplicate witnesses, forge
+times/ordinals, corrupt shares, race allowance consumption, roll back a
+cooperative ledger or control fewer than the release threshold of witnesses.
 
 ## Security objectives
 
@@ -57,6 +65,9 @@ passphrase or attempt to open as an unlisted identity.
 11. Require `T` unique valid member approvals before a Chain envelope exists.
 12. Release Chain plaintext only to a listed recipient after HPKE, AEAD,
     commitment and inner-artifact verification.
+13. For quorum contracts, release no CEK until a fresh recipient request and
+    `T` unique witness grants pass every signature, time, ledger and binding
+    check.
 
 ## Explicit non-goals
 
@@ -65,9 +76,12 @@ passphrase or attempt to open as an unlisted identity.
   already recovered by a Chain recipient.
 - Hiding Chain payload length, group membership, recipient count or public
   identity metadata.
-- Fresh `T-of-N` cooperation for every Chain open; envelope v2 direct release uses the
-  threshold to authorize finalization and then permits each listed recipient
-  to open independently.
+- Treating direct release as fresh `T-of-N` cooperation; direct recipients can
+  open independently after finalization.
+- Preventing replay after a recipient has retained a complete valid grant set,
+  reconstructed CEK or plaintext.
+- Strong date or usage enforcement when enough witnesses are compromised, or
+  when the witness clock/ledger can be rolled back.
 - Global atomicity across multiple files or filesystems.
 - Preservation of ownership, ACLs, xattrs, timestamps or platform-specific
   permission bits other than the portable executable flag.
@@ -90,5 +104,7 @@ every journal transition.
 Chain tests additionally cover wrong identity proofs, wrong private member
 keys, incomplete groups, threshold boundaries, duplicate approvals, proposal
 replay, unlisted recipients, multi-recipient byte equality, mutation,
-representative truncation, trailing bytes and canonical round trips. A
+representative truncation, trailing bytes, canonical round trips, Shamir
+threshold subsets, early release, duplicate grants, wrong recipients, grant
+mutation, idempotent request replay and exhausted allowances. A
 dedicated fuzz target exercises the bounded envelope parser.

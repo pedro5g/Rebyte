@@ -18,10 +18,12 @@ path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
+blake3.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
+jiff.workspace = true
 rebyte-codec = { path = "../rebyte-codec", version = "1.0.0" }
 rebyte-chain = { path = "../rebyte-chain", version = "1.0.0" }
 rebyte-core = { path = "../rebyte-core", version = "1.0.0" }

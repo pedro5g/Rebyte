@@ -65,6 +65,18 @@ pub enum ChainError {
     CryptographicFailure,
     /// The supplied identity is not an authorized capsule recipient.
     NotRecipient,
+    /// The supplied identity is not a release witness for this contract.
+    NotWitness,
+    /// A release request or grant was malformed, rebound or stale.
+    InvalidRelease,
+    /// The trusted witness clock has not reached the contract release time.
+    ReleaseNotYetAvailable,
+    /// The durable release ledger has exhausted this contract's allowance.
+    ReleaseLimitReached,
+    /// A threshold key share was malformed, duplicated or inconsistent.
+    InvalidShare,
+    /// A trusted clock or durable ledger backend could not make a decision.
+    ReleaseAuthorityUnavailable,
     /// Decrypted artifact length or digest did not match the signed proposal.
     IntegrityMismatch,
 }
@@ -103,6 +115,14 @@ impl fmt::Display for ChainError {
             }
             Self::CryptographicFailure => "Chain cryptographic operation failed",
             Self::NotRecipient => "identity is not an authorized capsule recipient",
+            Self::NotWitness => "identity is not an authorized release witness",
+            Self::InvalidRelease => "invalid or rebound Chain release document",
+            Self::ReleaseNotYetAvailable => "Chain release time has not been reached",
+            Self::ReleaseLimitReached => "Chain release allowance has been exhausted",
+            Self::InvalidShare => "invalid Chain threshold key share",
+            Self::ReleaseAuthorityUnavailable => {
+                "Chain trusted time or release ledger is unavailable"
+            }
             Self::IntegrityMismatch => "decrypted Chain artifact failed integrity verification",
         })
     }

@@ -5,6 +5,7 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -12,9 +13,12 @@ use clap::{Args, Subcommand};
 use rebyte_chain::{
     Capability, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError, ChainLimits,
     ContentKind as ContractContentKind, EncryptedIdentityDocument, GroupAcceptance,
-    GroupCertificate, GroupProposal, IdentityPublicDocument, ReleasePolicy, UnlockedIdentity,
-    accept_group, approve_capsule, create_capsule_proposal, create_semantic_patch_proposal,
-    finalize_capsule, finalize_group, generate_identity, open_capsule, open_semantic_patch,
+    GroupCertificate, GroupProposal, IdentityPublicDocument, OpenedContent, QuorumProposalOptions,
+    ReleaseGrant, ReleasePolicy, ReleaseRequest, TrustedClock, UnlockedIdentity, accept_group,
+    approve_capsule, create_capsule_proposal, create_quorum_capsule_proposal,
+    create_quorum_semantic_patch_proposal, create_release_request, create_semantic_patch_proposal,
+    finalize_capsule, finalize_group, generate_identity, grant_release, open_capsule,
+    open_quorum_content, open_semantic_patch,
 };
 use rebyte_core::{
     ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
@@ -34,6 +38,7 @@ use super::{
 const MAX_IDENTITY_DOCUMENT_BYTES: u64 = 128 * 1_024;
 const MAX_GROUP_DOCUMENT_BYTES: u64 = 2 * 1_024 * 1_024;
 const MAX_APPROVAL_DOCUMENT_BYTES: u64 = 128 * 1_024;
+const MAX_RELEASE_DOCUMENT_BYTES: u64 = 256 * 1_024;
 
 #[derive(Debug, Args)]
 pub(super) struct ChainCommand {
@@ -49,6 +54,8 @@ enum ChainSubcommand {
     Group(GroupCommand),
     /// Encrypt, approve, finalize, inspect and open group capsules.
     Capsule(CapsuleCommand),
+    /// Request, witness and consume threshold-protected releases.
+    Release(ReleaseCommand),
 }
 
 #[derive(Debug, Args)]
@@ -221,6 +228,23 @@ struct CapsuleCreateCommand {
     /// Public recipient identity; repeat for every person allowed to open.
     #[arg(long = "recipient", value_name = "PATH", required = true)]
     recipients: Vec<PathBuf>,
+    /// Witness public identity; repeat to enable quorum release.
+    #[arg(long = "witness", value_name = "PATH")]
+    witnesses: Vec<PathBuf>,
+    /// Number of distinct witness grants required.
+    #[arg(
+        long,
+        value_name = "T",
+        requires = "witnesses",
+        required_if_eq("maximum_releases", "1")
+    )]
+    release_threshold: Option<u16>,
+    /// Earliest release as RFC 3339 or non-negative Unix milliseconds.
+    #[arg(long, value_name = "TIME", value_parser = parse_not_before, requires = "witnesses")]
+    not_before: Option<u64>,
+    /// Maximum fresh releases; finite limits require all witnesses.
+    #[arg(long, value_name = "COUNT", requires = "witnesses")]
+    maximum_releases: Option<u32>,
     /// New encrypted proposal awaiting group approvals.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
@@ -340,6 +364,107 @@ struct CapsulePatchCommand {
 }
 
 #[derive(Debug, Args)]
+struct ReleaseCommand {
+    #[command(subcommand)]
+    command: ReleaseSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ReleaseSubcommand {
+    /// Create a fresh recipient-signed opening request.
+    Request(ReleaseRequestCommand),
+    /// Validate policy and issue one witness-encrypted share.
+    Grant(ReleaseGrantCommand),
+    /// Reconstruct quorum-protected exact content.
+    Open(ReleaseOpenCommand),
+    /// Apply a quorum-protected semantic patch.
+    Patch(ReleasePatchCommand),
+}
+
+#[derive(Debug, Args)]
+struct ReleaseRequestCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// New recipient-signed request document.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Emit a stable JSON summary.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ReleaseGrantCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    /// Recipient-signed release request.
+    #[arg(long, value_name = "PATH")]
+    request: PathBuf,
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// Private append-only witness ledger.
+    #[arg(long, value_name = "PATH")]
+    ledger: PathBuf,
+    /// Acknowledge that the OS clock and local ledger require a trusted,
+    /// rollback-protected witness host.
+    #[arg(long, required = true)]
+    acknowledge_local_authority: bool,
+    /// New signed, recipient-encrypted grant document.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Emit a stable JSON summary.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ReleaseOpenCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    /// Original recipient-signed release request.
+    #[arg(long, value_name = "PATH")]
+    request: PathBuf,
+    /// Witness grant; repeat exactly to the contract threshold.
+    #[arg(long = "grant", value_name = "PATH", required = true)]
+    grants: Vec<PathBuf>,
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// Reconstructed file or directory output.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Write canonical decrypted `.rba` bytes instead of reconstructing.
+    #[arg(long)]
+    raw_artifact: bool,
+    /// Emit a stable JSON summary.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ReleasePatchCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    /// Original recipient-signed release request.
+    #[arg(long, value_name = "PATH")]
+    request: PathBuf,
+    /// Witness grant; repeat exactly to the contract threshold.
+    #[arg(long = "grant", value_name = "PATH", required = true)]
+    grants: Vec<PathBuf>,
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// Existing JSON or TOML target file.
+    #[arg(long, value_name = "PATH")]
+    target: PathBuf,
+    #[command(flatten)]
+    mode: super::semantic_command::PatchApplyMode,
+    /// Emit a stable JSON summary.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct PrivateIdentityArgs {
     /// Passphrase-protected Chain private identity.
     #[arg(long, value_name = "PATH")]
@@ -364,6 +489,16 @@ pub(super) fn run(command: &ChainCommand) -> Result<(), CliError> {
         ChainSubcommand::Identity(command) => run_identity(command),
         ChainSubcommand::Group(command) => run_group(command),
         ChainSubcommand::Capsule(command) => run_capsule(command),
+        ChainSubcommand::Release(command) => run_release(command),
+    }
+}
+
+fn run_release(command: &ReleaseCommand) -> Result<(), CliError> {
+    match &command.command {
+        ReleaseSubcommand::Request(command) => create_release_request_command(command),
+        ReleaseSubcommand::Grant(command) => grant_release_command(command),
+        ReleaseSubcommand::Open(command) => open_release_command(command),
+        ReleaseSubcommand::Patch(command) => patch_release_command(command),
     }
 }
 
@@ -619,10 +754,32 @@ fn create_capsule(command: &CapsuleCreateCommand) -> Result<(), CliError> {
         .iter()
         .map(|path| read_public_identity(path))
         .collect::<Result<Vec<_>, _>>()?;
-    let proposal = if semantic_patch {
-        create_semantic_patch_proposal(group, &content, recipients, &limits)
+    let witnesses = command
+        .witnesses
+        .iter()
+        .map(|path| read_public_identity(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let proposal = if witnesses.is_empty() {
+        if semantic_patch {
+            create_semantic_patch_proposal(group, &content, recipients, &limits)
+        } else {
+            create_capsule_proposal(group, &content, recipients, &limits)
+        }
     } else {
-        create_capsule_proposal(group, &content, recipients, &limits)
+        let default_threshold = u16::try_from(witnesses.len())
+            .map_err(|_| CliError::new(EXIT_POLICY, "too many witnesses"))?;
+        let options = QuorumProposalOptions::new(
+            command.release_threshold.unwrap_or(default_threshold),
+            command.not_before,
+            command.maximum_releases,
+        );
+        if semantic_patch {
+            create_quorum_semantic_patch_proposal(
+                group, &content, recipients, witnesses, options, &limits,
+            )
+        } else {
+            create_quorum_capsule_proposal(group, &content, recipients, witnesses, options, &limits)
+        }
     }
     .map_err(chain_error)?;
     let bytes = proposal.to_bytes(&limits).map_err(chain_error)?;
@@ -780,10 +937,20 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
     }
     let identity = unlock_identity(&command.identity)?;
     let opened = open_capsule(&envelope, &identity, &limits).map_err(chain_error)?;
+    let report = write_opened_artifact(&opened, &command.output, command.raw_artifact, &limits)?;
+    emit_open_report(&report, command.json, "✓ Consensus capsule opened")
+}
+
+fn write_opened_artifact(
+    opened: &rebyte_chain::OpenedCapsule,
+    output: &Path,
+    raw_artifact: bool,
+    limits: &ChainLimits,
+) -> Result<OpenReport, CliError> {
     let content_bytes = opened.artifact_binary();
-    if command.raw_artifact {
-        write_new(&command.output, content_bytes, false)
-            .map_err(|error| output_error("decrypted artifact", &command.output, &error))?;
+    if raw_artifact {
+        write_new(output, content_bytes, false)
+            .map_err(|error| output_error("decrypted artifact", output, &error))?;
     } else {
         let mut temporary = tempfile::Builder::new()
             .prefix("rebyte-chain-open-")
@@ -807,7 +974,7 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
                 format!("cannot synchronize decrypted Chain staging: {error}"),
             )
         })?;
-        decode_artifact_file(temporary.path(), Some(&command.output), &limits.artifact).map_err(
+        decode_artifact_file(temporary.path(), Some(output), &limits.artifact).map_err(
             |error| {
                 CliError::new(
                     EXIT_GENERIC,
@@ -816,20 +983,23 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
             },
         )?;
     }
-    let report = OpenReport {
+    Ok(OpenReport {
         schema_version: 2,
         contract_id: opened.contract_id().to_base64(),
         group_id: opened.group_id().to_base64(),
         proposal_id: encode(opened.proposal_id()),
         recipient_id: opened.recipient_id().to_base64(),
         content_bytes: content_bytes.len(),
-        raw_artifact: command.raw_artifact,
-        output: command.output.display().to_string(),
-    };
-    if command.json {
+        raw_artifact,
+        output: output.display().to_string(),
+    })
+}
+
+fn emit_open_report(report: &OpenReport, json: bool, success: &str) -> Result<(), CliError> {
+    if json {
         write_json(&report)
     } else {
-        println!("{}", super::ui::success("✓ Consensus capsule opened"));
+        println!("{}", super::ui::success(success));
         println!("  Contract     {}", report.contract_id);
         println!("  Group ID     {}", report.group_id);
         println!("  Proposal ID  {}", report.proposal_id);
@@ -840,6 +1010,182 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
         );
         println!("  Output       {}", report.output);
         Ok(())
+    }
+}
+
+fn create_release_request_command(command: &ReleaseRequestCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    let recipient = unlock_identity(&command.identity)?;
+    let request = create_release_request(&envelope, &recipient, &limits).map_err(chain_error)?;
+    write_new(
+        &command.output,
+        &request.to_json().map_err(chain_error)?,
+        false,
+    )
+    .map_err(|error| output_error("release request", &command.output, &error))?;
+    let report = ReleaseRequestReport {
+        schema_version: 1,
+        request_id: encode(&request.request_id().map_err(chain_error)?),
+        envelope_id: encode(envelope.envelope_id()),
+        recipient_id: request
+            .recipient()
+            .identity_id()
+            .map_err(chain_error)?
+            .to_base64(),
+        output: command.output.display().to_string(),
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::success("✓ Fresh release request signed"));
+        println!("  Request ID   {}", report.request_id);
+        println!("  Envelope ID  {}", report.envelope_id);
+        println!("  Recipient    {}", report.recipient_id);
+        println!("  Output       {}", report.output);
+        println!("\nSend the same request and capsule to the required witnesses.");
+        Ok(())
+    }
+}
+
+fn grant_release_command(command: &ReleaseGrantCommand) -> Result<(), CliError> {
+    if !command.acknowledge_local_authority {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "--acknowledge-local-authority is required",
+        ));
+    }
+    ensure_output_absent(&command.output)?;
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    let request = read_release_request(&command.request)?;
+    let witness = unlock_identity(&command.identity)?;
+    let mut ledger =
+        super::release_ledger::FileReleaseLedger::open(&command.ledger, witness.identity_id())
+            .map_err(chain_error)?;
+    let grant = grant_release(
+        &envelope,
+        &request,
+        &witness,
+        &CooperativeSystemClock,
+        &mut ledger,
+        &limits,
+    )
+    .map_err(chain_error)?;
+    write_new(
+        &command.output,
+        &grant.to_json().map_err(chain_error)?,
+        false,
+    )
+    .map_err(|error| output_error("release grant", &command.output, &error))?;
+    let report = ReleaseGrantReport {
+        schema_version: 1,
+        request_id: encode(&request.request_id().map_err(chain_error)?),
+        witness_id: grant.witness_id().map_err(chain_error)?.to_base64(),
+        observed_unix_ms: grant.observed_unix_ms(),
+        release_ordinal: grant.release_ordinal(),
+        output: command.output.display().to_string(),
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::success("✓ Witness release granted"));
+        println!("  Request ID   {}", report.request_id);
+        println!("  Witness      {}", report.witness_id);
+        println!("  Observed ms  {}", report.observed_unix_ms);
+        println!("  Ordinal      {}", report.release_ordinal);
+        println!("  Output       {}", report.output);
+        println!(
+            "\nAuthority boundary: this grant trusts this witness host's OS clock and ledger."
+        );
+        Ok(())
+    }
+}
+
+fn open_release_command(command: &ReleaseOpenCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    if !command.raw_artifact
+        && !envelope
+            .proposal()
+            .contract()
+            .capabilities()
+            .contains(Capability::Reconstruct)
+    {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "access contract does not grant reconstruction",
+        ));
+    }
+    let request = read_release_request(&command.request)?;
+    let grants = read_release_grants(&command.grants)?;
+    let recipient = unlock_identity(&command.identity)?;
+    let opened = open_quorum_content(&envelope, &request, &grants, &recipient, &limits)
+        .map_err(chain_error)?;
+    let OpenedContent::ExactArtifact(opened) = opened else {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "protected content is a semantic patch; use `chain release patch`",
+        ));
+    };
+    let report = write_opened_artifact(&opened, &command.output, command.raw_artifact, &limits)?;
+    emit_open_report(&report, command.json, "✓ Quorum-protected capsule opened")
+}
+
+fn patch_release_command(command: &ReleasePatchCommand) -> Result<(), CliError> {
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    if !envelope
+        .proposal()
+        .contract()
+        .capabilities()
+        .contains(Capability::ApplySemanticPatch)
+    {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "access contract does not grant semantic patch application",
+        ));
+    }
+    let request = read_release_request(&command.request)?;
+    let grants = read_release_grants(&command.grants)?;
+    let recipient = unlock_identity(&command.identity)?;
+    let opened = open_quorum_content(&envelope, &request, &grants, &recipient, &limits)
+        .map_err(chain_error)?;
+    let OpenedContent::SemanticPatch(opened) = opened else {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "protected content is an exact artifact; use `chain release open`",
+        ));
+    };
+    super::semantic_command::apply_patch_document(
+        opened.patch(),
+        &super::semantic_command::PatchApplyRequest {
+            target: &command.target,
+            mode: super::semantic_command::PatchApplyMode {
+                dry_run: command.mode.dry_run,
+                yes: command.mode.yes,
+                backup: command.mode.backup,
+            },
+            json: command.json,
+            authorization: Some(format!(
+                "Chain quorum contract {} · proposal {}",
+                opened.contract_id().to_base64(),
+                encode(opened.proposal_id())
+            )),
+        },
+    )
+}
+
+struct CooperativeSystemClock;
+
+impl TrustedClock for CooperativeSystemClock {
+    fn now_unix_ms(&self) -> Result<u64, ChainError> {
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ChainError::ReleaseAuthorityUnavailable)?;
+        u64::try_from(elapsed.as_millis()).map_err(|_| ChainError::ReleaseAuthorityUnavailable)
     }
 }
 
@@ -1204,6 +1550,23 @@ fn read_capsule_approval(path: &Path) -> Result<CapsuleApproval, CliError> {
     CapsuleApproval::from_json(&bytes).map_err(chain_error)
 }
 
+fn read_release_request(path: &Path) -> Result<ReleaseRequest, CliError> {
+    let bytes = read_bounded_nofollow(path, MAX_RELEASE_DOCUMENT_BYTES)
+        .map_err(|error| input_error("release request", path, &error))?;
+    ReleaseRequest::from_json(&bytes).map_err(chain_error)
+}
+
+fn read_release_grants(paths: &[PathBuf]) -> Result<Vec<ReleaseGrant>, CliError> {
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = read_bounded_nofollow(path, MAX_RELEASE_DOCUMENT_BYTES)
+                .map_err(|error| input_error("release grant", path, &error))?;
+            ReleaseGrant::from_json(&bytes).map_err(chain_error)
+        })
+        .collect()
+}
+
 fn read_capsule_input(
     input: &CapsuleInputArgs,
     limits: &ChainLimits,
@@ -1228,6 +1591,7 @@ fn chain_error(error: ChainError) -> CliError {
         | ChainError::InvalidContent => EXIT_DIGEST,
         ChainError::NotGroupMember
         | ChainError::NotRecipient
+        | ChainError::NotWitness
         | ChainError::IncompleteGroup
         | ChainError::InsufficientApprovals
         | ChainError::InvalidThreshold
@@ -1235,7 +1599,12 @@ fn chain_error(error: ChainError) -> CliError {
         | ChainError::IdentityMismatch
         | ChainError::BindingMismatch
         | ChainError::InvalidContract
-        | ChainError::UnsupportedReleasePolicy => EXIT_POLICY,
+        | ChainError::UnsupportedReleasePolicy
+        | ChainError::InvalidRelease
+        | ChainError::ReleaseNotYetAvailable
+        | ChainError::ReleaseLimitReached
+        | ChainError::ReleaseAuthorityUnavailable
+        | ChainError::InvalidShare => EXIT_POLICY,
         _ => EXIT_MALFORMED,
     };
     CliError::new(exit_code, error.to_string())
@@ -1257,6 +1626,24 @@ fn output_error(kind: &str, path: &Path, error: &std::io::Error) -> CliError {
 
 fn encode(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn parse_not_before(value: &str) -> Result<u64, String> {
+    if let Ok(milliseconds) = value.parse::<u64>() {
+        return Ok(milliseconds);
+    }
+    let timestamp = value
+        .parse::<jiff::Timestamp>()
+        .map_err(|error| format!("expected RFC 3339 or Unix milliseconds: {error}"))?;
+    let milliseconds = u64::try_from(timestamp.as_millisecond())
+        .map_err(|_| "release time must not precede the Unix Epoch".to_string())?;
+    if timestamp.subsec_nanosecond() % 1_000_000 == 0 {
+        Ok(milliseconds)
+    } else {
+        milliseconds
+            .checked_add(1)
+            .ok_or_else(|| "release time exceeds Unix millisecond range".to_string())
+    }
 }
 
 #[derive(Serialize)]
@@ -1362,6 +1749,27 @@ struct SignatureReport {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ReleaseRequestReport {
+    schema_version: u16,
+    request_id: String,
+    envelope_id: String,
+    recipient_id: String,
+    output: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReleaseGrantReport {
+    schema_version: u16,
+    request_id: String,
+    witness_id: String,
+    observed_unix_ms: u64,
+    release_ordinal: u32,
+    output: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CapsuleRecipientReport {
     display_name: String,
     identity_id: String,
@@ -1381,6 +1789,11 @@ struct CapsuleReport {
     release_policy: &'static str,
     recipients: Vec<CapsuleRecipientReport>,
     recipient_count: usize,
+    witnesses: Vec<CapsuleRecipientReport>,
+    witness_count: usize,
+    release_threshold: Option<u16>,
+    not_before_unix_ms: Option<u64>,
+    maximum_releases: Option<u32>,
     required_approvals: u16,
     approvals: usize,
     finalized: bool,
@@ -1394,16 +1807,33 @@ impl CapsuleReport {
         approvals: usize,
         envelope_bytes: usize,
     ) -> Result<Self, CliError> {
-        let recipients = proposal
-            .recipients()
-            .into_iter()
-            .map(|recipient| {
-                Ok(CapsuleRecipientReport {
-                    display_name: recipient.display_name().to_string(),
-                    identity_id: recipient.identity_id().map_err(chain_error)?.to_base64(),
-                })
-            })
-            .collect::<Result<Vec<_>, CliError>>()?;
+        let holders = proposal.key_holders();
+        let (recipients, witnesses, release_threshold, not_before_unix_ms, maximum_releases) =
+            match proposal.contract().release() {
+                ReleasePolicy::DirectRecipients => {
+                    let recipients = identity_reports(holders)?;
+                    (recipients, Vec::new(), None, None, None)
+                }
+                ReleasePolicy::Quorum(policy) => {
+                    let recipients = proposal
+                        .contract()
+                        .recipients()
+                        .iter()
+                        .map(|recipient| CapsuleRecipientReport {
+                            display_name: "(contract recipient)".to_string(),
+                            identity_id: recipient.to_base64(),
+                        })
+                        .collect();
+                    (
+                        recipients,
+                        identity_reports(holders)?,
+                        Some(policy.threshold()),
+                        policy.not_before_unix_ms(),
+                        policy.maximum_successful_releases(),
+                    )
+                }
+                _ => return Err(CliError::new(EXIT_POLICY, "unsupported release policy")),
+            };
         Ok(Self {
             schema_version: 2,
             contract_id: proposal.contract().contract_id().to_base64(),
@@ -1428,6 +1858,11 @@ impl CapsuleReport {
             },
             recipient_count: recipients.len(),
             recipients,
+            witness_count: witnesses.len(),
+            witnesses,
+            release_threshold,
+            not_before_unix_ms,
+            maximum_releases,
             required_approvals: proposal.group().capsule_threshold(),
             approvals,
             finalized,
@@ -1463,6 +1898,36 @@ fn print_capsule_report(report: &CapsuleReport) {
     for recipient in &report.recipients {
         println!("    {}  {}", recipient.display_name, recipient.identity_id);
     }
+    if report.witness_count > 0 {
+        println!(
+            "  Witnesses     {} · threshold {}",
+            report.witness_count,
+            report.release_threshold.unwrap_or_default()
+        );
+        for witness in &report.witnesses {
+            println!("    {}  {}", witness.display_name, witness.identity_id);
+        }
+        if let Some(not_before) = report.not_before_unix_ms {
+            println!("  Not before    {not_before} Unix ms");
+        }
+        if let Some(maximum) = report.maximum_releases {
+            println!("  Releases      at most {maximum} fresh session(s)");
+        }
+    }
+}
+
+fn identity_reports(
+    identities: Vec<&IdentityPublicDocument>,
+) -> Result<Vec<CapsuleRecipientReport>, CliError> {
+    identities
+        .into_iter()
+        .map(|identity| {
+            Ok(CapsuleRecipientReport {
+                display_name: identity.display_name().to_string(),
+                identity_id: identity.identity_id().map_err(chain_error)?.to_base64(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -1615,4 +2080,20 @@ fn capability_names(proposal: &CapsuleProposal) -> Vec<&'static str> {
     .into_iter()
     .filter_map(|(capability, name)| capabilities.contains(capability).then_some(name))
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_not_before;
+
+    #[test]
+    fn release_time_accepts_epoch_milliseconds_and_rounds_rfc3339_up() {
+        assert_eq!(parse_not_before("1234"), Ok(1_234));
+        assert_eq!(
+            parse_not_before("1970-01-01T00:00:01.000000001Z"),
+            Ok(1_001)
+        );
+        assert!(parse_not_before("1969-12-31T23:59:59Z").is_err());
+        assert!(parse_not_before("tomorrow").is_err());
+    }
 }

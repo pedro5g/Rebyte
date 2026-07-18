@@ -16,15 +16,17 @@ canonical Semantic Patch v1 document with:
 - `T-of-N` Ed25519 authorization of one exact encrypted capsule proposal;
 - a canonical Access Contract binding content, controllers, recipients,
   capabilities and the content-key release mechanism;
-- one payload ciphertext and one HPKE-wrapped content key per recipient;
+- one payload ciphertext and either one HPKE-wrapped CEK per direct recipient
+  or one HPKE-wrapped Shamir share per release witness;
 - byte-exact file/directory reconstruction or bounded semantic application
   after full validation.
 
 The capsule sealing threshold authorizes envelope creation. It does not
 require members to come online again for each open. Every listed recipient can
 open a direct-release contract independently with its own private identity.
-Quorum-release contracts are represented by the contract protocol but rejected
-by envelope v2 until the interactive key-share protocol is implemented.
+Quorum-release contracts require a fresh recipient-signed request and the
+configured number of independently signed witness grants. Each grant carries
+only that witness's share, encrypted to the requesting recipient.
 
 ## Algorithms
 
@@ -34,6 +36,7 @@ Suite `1` fixes:
 |---|---|
 | Member proof and approvals | Ed25519 |
 | Recipient key wrapping | RFC 9180 HPKE Base mode: X25519-HKDF-SHA256, HKDF-SHA256, ChaCha20-Poly1305 |
+| Quorum CEK sharing | Shamir secret sharing over GF(256), 32-byte secret, 1-byte nonzero share coordinate |
 | Artifact payload | XChaCha20-Poly1305 with a fresh random 256-bit CEK |
 | Fingerprints and commitments | BLAKE3 derive-key mode with distinct contexts |
 | Private identity KDF | Argon2id v1.3, 64 MiB, 3 iterations, 1 lane |
@@ -51,7 +54,8 @@ random source. Failure to obtain entropy aborts the operation.
 ## Canonical control documents
 
 Public identities, encrypted private identities, group proposals, group
-acceptances, group certificates and capsule approvals are strict
+acceptances, group certificates, capsule approvals, release requests and
+release grants are strict
 schema-versioned JSON documents. Unknown fields are rejected. Base64URL fields
 must be unpadded and canonical.
 
@@ -113,34 +117,38 @@ CapsuleProposal {
     content_digest        [32]byte
     content_size          u64
     payload_nonce         [24]byte
-    recipient_count       u16
-    recipients[recipient_count] {
+    key_holder_count      u16
+    key_holders[key_holder_count] {
         public_identity   bytes32
         hpke_encapped_key [32]byte
-        wrapped_cek       [48]byte
+        wrapped_key       [48]byte direct | [49]byte quorum
     }
     ciphertext            bytes32
     proposal_id           [32]byte
 }
 ```
 
-Recipients are sorted and unique by `IdentityId`; v2 permits 1 to 64. The
-protected content is fully decoded and verified before encryption. The encoder:
+Key holders are sorted and unique by `IdentityId`; v2 permits 1 to 64. They
+are the direct recipients for `directRecipients` and the witnesses for
+`quorum`. The protected content is fully decoded and verified before
+encryption. The encoder:
 
 1. validates that the contract exactly binds the group ID, complete controller
    set, sealing threshold, recipient set, content digest, content size and
    content kind;
-2. rejects quorum release rather than weakening it to direct recipient slots;
+2. validates that key holders exactly equal the direct recipients or quorum
+   witnesses selected by the release policy;
 3. generates a fresh 32-byte CEK, proposal nonce and payload nonce;
 4. computes the group-certificate, contract and proposal-core commitments;
 5. encrypts the complete canonical `.rba` or patch once with
    XChaCha20-Poly1305;
-6. uses RFC 9180 HPKE independently for each public X25519 recipient key;
-7. wraps only the same 32-byte CEK in each recipient slot;
-8. computes `ProposalId` over the group, contract, recipients, HPKE slots and
+6. for direct release, HPKE-wraps the same 32-byte CEK for every recipient;
+7. for quorum release, splits the CEK with a degree `T-1` polynomial over
+   GF(256) and HPKE-wraps one 33-byte `x || y[32]` share for every witness;
+8. computes `ProposalId` over the group, contract, holders, HPKE slots and
    ciphertext digest.
 
-The group, proposal nonce and recipient identity are bound into HPKE `info`.
+The group, proposal nonce, holder identity and release mode are bound into HPKE `info`.
 The proposal-core digest is HPKE associated data. The full proposal core is
 payload associated data. Reordering, removing, adding or substituting a
 recipient invalidates the proposal.
@@ -186,12 +194,57 @@ Envelope v1 and the `rbe1_` text form are deliberately not accepted by the v2
 decoder. Applications must never guess a version or reinterpret old bytes
 under new authorization semantics.
 
+## Quorum release session
+
+A recipient creates canonical `rebyte-chain-release-request` JSON containing
+`EnvelopeId`, `ProposalId`, `ContractId`, its complete public identity, a fresh
+32-byte nonce, `RequestId` and an Ed25519 signature. The request message is:
+
+```text
+"rebyte chain release request signature v1\0" ||
+version || EnvelopeId || ProposalId || ContractId || request_nonce ||
+bytes32(recipient_public_identity)
+```
+
+`RequestId` is BLAKE3 derive-key mode over that message and signature with
+context `Rebyte Chain release request id v1 2026-07-18`.
+
+Each witness verifies the complete envelope, request signature, recipient,
+contract, trusted time and durable ledger. It unwraps only its own proposal
+share, atomically records the request and HPKE-wraps the share to the
+requesting recipient. Canonical `rebyte-chain-release-grant` JSON binds:
+
+- `RequestId`, `EnvelopeId` and the complete witness public identity;
+- the witness-observed Unix time in milliseconds;
+- the durable ledger ordinal;
+- a fresh HPKE encapsulation and 49-byte encrypted share;
+- a domain-separated `GrantId` and witness Ed25519 signature.
+
+The recipient accepts exactly `T` unique grants from contract witnesses,
+verifies every signature/binding/time/ordinal, HPKE-opens each share and checks
+that its coordinate matches the witness's canonical policy position. Shamir
+interpolation reconstructs the CEK at `x = 0`; payload AEAD, digest, length and
+the content decoder are then revalidated.
+
+Finite `maximumSuccessfulReleases` requires `T = N`. Without a consensus
+ledger, this prevents two different concurrent requests from succeeding
+through partially overlapping quorums. A repeated `RequestId` is idempotent
+and retains its original ordinal.
+
+The native CLI's append-only ledger and operating-system clock are a
+cooperative authority. They are useful only on a witness host whose clock,
+filesystem and backups are protected from rollback. A production authority
+must implement the `TrustedClock` and `ReleaseLedger` traits with independent
+trusted time and monotonic durable state.
+
 ## Standard limits
 
 | Resource | Limit |
 |---|---:|
 | Group members | 64 |
 | Recipients | 64 |
+| Release witnesses | 64 |
+| Release request or grant JSON | 256 KiB |
 | Group JSON inside an envelope | 1 MiB |
 | Public identity JSON inside a slot | 64 KiB |
 | Binary proposal or envelope | 38 MiB |
@@ -217,9 +270,11 @@ Protected plaintext is released only after:
    recipients, content digest and content size;
 7. recomputing `GroupId`, `ProposalId` and `EnvelopeId`;
 8. verifying the configured number of unique capsule approvals;
-9. rejecting any unsupported release policy;
+9. selecting direct release or verifying a fresh recipient request plus `T`
+   unique witness grants;
 10. finding the opener's exact recipient identity and `decrypt` capability;
-11. HPKE-decapsulating that recipient's CEK slot;
+11. HPKE-decapsulating the direct CEK, or the witness shares and reconstructing
+    the CEK;
 12. authenticating and decrypting the payload;
 13. checking the exact plaintext length and protected-content digest;
 14. selecting the strict decoder from the contract content kind;
@@ -234,11 +289,14 @@ messages. Existing output paths are never overwritten by the CLI.
 ## Security boundary
 
 The envelope protects confidentiality from parties without a listed recipient
-private key and authenticates the group authorization that finalized it. It
+private key and, for quorum mode, the configured witness shares. It
+authenticates the group authorization that finalized it. It
 does not hide payload size, recipient count or public identities. It cannot
 force a recipient to delete plaintext after opening, protect secrets on a
-compromised endpoint, prove a global timestamp or revoke a capsule already
-possessed by an authorized recipient.
+compromised endpoint, independently prove a global timestamp or revoke
+plaintext/key/grants already retained by an authorized recipient. A maximum
+release count limits fresh witness-authorized sessions; it cannot make already
+released bytes mathematically disappear.
 
 The cryptographic constructions follow
 [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180) for HPKE and

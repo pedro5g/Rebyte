@@ -287,6 +287,12 @@ impl QuorumRelease {
         if self.maximum_successful_releases == Some(0) {
             return Err(ContractError::InvalidUsageLimit);
         }
+        // A global usage limit without a consensus ledger is safe only when
+        // every witness participates. Otherwise two intersecting quorums can
+        // authorize different concurrent requests through a dishonest overlap.
+        if self.maximum_successful_releases.is_some() && self.threshold != count {
+            return Err(ContractError::InvalidUsageThreshold);
+        }
         Ok(())
     }
 }
@@ -670,6 +676,8 @@ pub enum ContractError {
     InvalidThreshold,
     /// A usage limit was zero.
     InvalidUsageLimit,
+    /// A usage-limited release did not require every witness.
+    InvalidUsageThreshold,
     /// Capabilities were empty, unknown or incompatible with content.
     InvalidCapabilities,
     /// A version, content kind or release mode was unsupported.
@@ -694,6 +702,7 @@ impl fmt::Display for ContractError {
             Self::NonCanonicalOrder => "access-contract principals are not canonically ordered",
             Self::InvalidThreshold => "invalid access-contract threshold",
             Self::InvalidUsageLimit => "invalid access-contract usage limit",
+            Self::InvalidUsageThreshold => "usage-limited release requires unanimous witnesses",
             Self::InvalidCapabilities => "invalid access-contract capabilities",
             Self::UnsupportedValue => "unsupported access-contract version or value",
             Self::UnexpectedEof => "truncated access contract",
@@ -930,7 +939,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let quorum = QuorumRelease::new(
             vec![principal(3), principal(1), principal(2)],
-            2,
+            3,
             Some(1_800_000_000_000),
             Some(1),
         )?;
@@ -946,6 +955,15 @@ mod tests {
             .release(ReleasePolicy::Quorum(quorum)),
         )?;
         assert_eq!(AccessContract::from_bytes(&contract.to_bytes()?)?, contract);
+        assert!(matches!(
+            QuorumRelease::new(
+                vec![principal(1), principal(2), principal(3)],
+                2,
+                None,
+                Some(1)
+            ),
+            Err(ContractError::InvalidUsageThreshold)
+        ));
         Ok(())
     }
 
