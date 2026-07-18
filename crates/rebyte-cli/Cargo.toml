@@ -34,6 +34,7 @@ rebyte-signature = { path = "../rebyte-signature", version = "1.0.0" }
 rebyte-signer = { path = "../rebyte-signer", version = "1.0.0" }
 rebyte-verify = { path = "../rebyte-verify", version = "1.0.0" }
 rpassword.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true

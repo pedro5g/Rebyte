@@ -5,6 +5,7 @@
 mod artifact_command;
 mod chain_command;
 mod fingerprint;
+mod hardening;
 mod hash_command;
 mod keys;
 mod producer;
@@ -226,6 +227,7 @@ enum ChannelArgument {
 }
 
 fn main() -> ExitCode {
+    hardening::harden_process();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

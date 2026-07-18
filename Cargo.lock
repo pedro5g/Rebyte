@@ -1220,6 +1220,7 @@ dependencies = [
  "rebyte-signer",
  "rebyte-verify",
  "rpassword",
+ "rustix",
  "serde",
  "serde_json",
  "similar",
