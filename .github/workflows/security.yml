@@ -34,7 +34,16 @@ jobs:
       - name: Install nightly Miri
         run: rustup toolchain install nightly --profile minimal --component miri
       - name: Run Miri
-        run: cargo +nightly miri test -p rebyte-format -p rebyte-codec -p rebyte-integrity
+        run: >-
+          cargo +nightly miri test
+          -p rebyte-format
+          -p rebyte-codec
+          -p rebyte-integrity
+          --lib
+      - name: Run Miri on contracts and secret sharing
+        run: |
+          cargo +nightly miri test -p rebyte-contract --lib
+          cargo +nightly miri test -p rebyte-chain --lib secret_sharing::tests
 
   fuzz:
     name: Bounded parser fuzzing
@@ -45,7 +54,9 @@ jobs:
         target:
           - decode_capsule
           - decode_token
+          - decode_artifact
           - decode_chain_envelope
+          - decode_chain_control
           - portable_path
           - decompress
     steps:
@@ -69,7 +80,15 @@ jobs:
       - name: Install cargo-mutants
         run: cargo install --locked cargo-mutants
       - name: Test security-critical crates
-        run: cargo mutants --in-place -p rebyte-format -p rebyte-codec -p rebyte-integrity -p rebyte-verify --timeout 120
+        run: >-
+          cargo mutants --in-place
+          -p rebyte-format
+          -p rebyte-codec
+          -p rebyte-integrity
+          -p rebyte-artifact-token
+          -p rebyte-contract
+          -p rebyte-verify
+          --timeout 120
 
   coverage:
     name: Coverage report

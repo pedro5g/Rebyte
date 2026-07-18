@@ -56,3 +56,10 @@ path = "fuzz_targets/decode_chain_envelope.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_chain_control"
+path = "fuzz_targets/decode_chain_control.rs"
+test = false
+doc = false
+bench = false

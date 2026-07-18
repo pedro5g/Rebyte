@@ -25,6 +25,11 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Local cargo-fuzz discoveries and crash artifacts. Stable regression vectors
+# belong in explicit test fixtures instead of machine-specific corpora.
+/fuzz/corpus/
+/fuzz/artifacts/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

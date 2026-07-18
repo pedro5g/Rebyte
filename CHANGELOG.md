@@ -35,6 +35,9 @@ and releases follow Semantic Versioning.
 - Complete `chain release request|grant|open|patch` CLI workflow, including
   denial before the release time and after a fresh-session allowance is spent.
 - A bounded Chain-envelope fuzz target and scheduled parser fuzzing.
+- Dedicated fuzzing for the definitive artifact parser and canonical Chain
+  control documents, plus scheduled Miri coverage for contracts and Shamir
+  sharing.
 
 ### Fixed
 
