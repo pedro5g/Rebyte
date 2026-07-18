@@ -17,6 +17,9 @@ and releases follow Semantic Versioning.
   recipients, capabilities, exact content and direct or quorum key release.
 - Fail-closed Chain v2 contract integration; unsupported quorum, temporal and
   maximum-release policies cannot degrade into local clock/counter checks.
+- Contract-gated `chain capsule diff` and recoverable `chain capsule apply`
+  commands, sharing the RAP transaction engine and preserving explicit empty
+  directories through journaled creation and rollback.
 - Complete `rebyte chain identity`, `chain group` and `chain capsule` CLI
   workflows, stable JSON reports and byte-exact file/directory integration
   coverage.

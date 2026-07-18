@@ -15,7 +15,12 @@ use rebyte_chain::{
     IdentityPublicDocument, ReleasePolicy, UnlockedIdentity, accept_group, approve_capsule,
     create_capsule_proposal, finalize_capsule, finalize_group, generate_identity, open_capsule,
 };
-use rebyte_core::decode_artifact_file;
+use rebyte_core::{
+    ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
+    DirectoryDiffEntry, VerifiedFile, apply_verified_tree, decode_artifact, decode_artifact_file,
+    diff_verified_directories, diff_verified_files,
+};
+use rebyte_format::{ContentKind as FileContentKind, Digest32, RelativeArtifactPath};
 use serde::Serialize;
 
 use super::keys::{PassphraseArgs, ensure_output_absent, read_passphrase};
@@ -183,6 +188,10 @@ enum CapsuleSubcommand {
     Inspect(CapsuleInspectCommand),
     /// Decrypt and reconstruct an artifact for an authorized recipient.
     Open(CapsuleOpenCommand),
+    /// Decrypt and compare an authorized artifact with a local root.
+    Diff(CapsuleDiffCommand),
+    /// Decrypt and transactionally apply an authorized artifact.
+    Apply(CapsuleApplyCommand),
 }
 
 #[derive(Debug, Args)]
@@ -263,6 +272,42 @@ struct CapsuleOpenCommand {
 }
 
 #[derive(Debug, Args)]
+struct CapsuleDiffCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// Capability-confined local comparison root.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Relative target for a single-file artifact, overriding its suggestion.
+    #[arg(long, value_name = "RELATIVE_PATH")]
+    path: Option<String>,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CapsuleApplyCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// Capability-confined local application root.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Relative target for a single-file artifact, overriding its suggestion.
+    #[arg(long, value_name = "RELATIVE_PATH")]
+    path: Option<String>,
+    #[command(flatten)]
+    mode: super::ApplyModeArgs,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct PrivateIdentityArgs {
     /// Passphrase-protected Chain private identity.
     #[arg(long, value_name = "PATH")]
@@ -313,6 +358,8 @@ fn run_capsule(command: &CapsuleCommand) -> Result<(), CliError> {
         CapsuleSubcommand::Finalize(command) => finalize_capsule_command(command),
         CapsuleSubcommand::Inspect(command) => inspect_capsule(command),
         CapsuleSubcommand::Open(command) => open_capsule_command(command),
+        CapsuleSubcommand::Diff(command) => diff_capsule_command(command),
+        CapsuleSubcommand::Apply(command) => apply_capsule_command(command),
     }
 }
 
@@ -663,6 +710,18 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
     ensure_output_absent(&command.output)?;
     let limits = ChainLimits::STANDARD;
     let envelope = read_capsule_input(&command.input, &limits)?;
+    if !command.raw_artifact
+        && !envelope
+            .proposal()
+            .contract()
+            .capabilities()
+            .contains(Capability::Reconstruct)
+    {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "access contract does not grant reconstruction",
+        ));
+    }
     let identity = unlock_identity(&command.identity)?;
     let opened = open_capsule(&envelope, &identity, &limits).map_err(chain_error)?;
     let artifact_bytes = opened.artifact_binary();
@@ -725,6 +784,264 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
         );
         println!("  Output       {}", report.output);
         Ok(())
+    }
+}
+
+fn diff_capsule_command(command: &CapsuleDiffCommand) -> Result<(), CliError> {
+    let authorized = authorize_file_operations(
+        &command.input,
+        &command.identity,
+        command.path.as_deref(),
+        Capability::Diff,
+    )?;
+    let report = diff_verified_files(&authorized.files, &command.root)
+        .map_err(|error| CliError::new(EXIT_GENERIC, error.to_string()))?;
+    let directories = diff_verified_directories(&authorized.directories, &command.root)
+        .map_err(|error| CliError::new(EXIT_GENERIC, error.to_string()))?;
+    if command.json {
+        write_json(&ChainDiffJson::new(&authorized, &report, &directories))
+    } else {
+        println!(
+            "{}",
+            super::ui::heading("Chain diff · contract and plaintext fully verified")
+        );
+        println!("Contract: {}", authorized.contract_id);
+        println!(
+            "Proposal: {}",
+            encode(authorized.proposal_digest.as_bytes())
+        );
+        super::print_diff(&report);
+        print_directory_diff(&directories);
+        Ok(())
+    }
+}
+
+fn apply_capsule_command(command: &CapsuleApplyCommand) -> Result<(), CliError> {
+    let authorized = authorize_file_operations(
+        &command.input,
+        &command.identity,
+        command.path.as_deref(),
+        Capability::Apply,
+    )?;
+    let changes = diff_verified_files(&authorized.files, &command.root)
+        .map_err(|error| CliError::new(EXIT_POLICY, error.to_string()))?;
+    let directories = diff_verified_directories(&authorized.directories, &command.root)
+        .map_err(|error| CliError::new(EXIT_POLICY, error.to_string()))?;
+    if command.mode.dry_run {
+        if command.json {
+            return write_json(&ChainApplyJson::preview(
+                &authorized,
+                &changes,
+                &directories,
+            ));
+        }
+        println!(
+            "{}",
+            super::ui::heading(
+                "Chain dry run · contract and plaintext verified · no files written"
+            )
+        );
+        println!("Contract: {}", authorized.contract_id);
+        super::print_diff(&changes);
+        print_directory_diff(&directories);
+        return Ok(());
+    }
+    if !command.mode.yes && !super::confirm_apply(&changes, !command.json)? {
+        if command.json {
+            return write_json(&ChainApplyJson::cancelled(
+                &authorized,
+                &changes,
+                &directories,
+            ));
+        }
+        println!(
+            "{}",
+            super::ui::heading("Chain application cancelled · no files were written")
+        );
+        return Ok(());
+    }
+    let report = apply_verified_tree(
+        authorized.proposal_digest,
+        &authorized.files,
+        &authorized.directories,
+        &command.root,
+        &ApplyOptions {
+            retain_backup: command.mode.backup,
+        },
+    )
+    .map_err(CliError::apply)?;
+    if command.json {
+        write_json(&ChainApplyJson::applied(
+            &authorized,
+            &changes,
+            &directories,
+            &report,
+        ))
+    } else {
+        println!(
+            "{}",
+            super::ui::success(&format!(
+                "✓ Applied {} contract-authorized files ({} bytes) · transaction {}",
+                report.files_written, report.bytes_written, report.transaction_id
+            ))
+        );
+        println!("  Contract     {}", authorized.contract_id);
+        if let Some(path) = report.retained_backup {
+            println!("  Backup       {}", path.display());
+        }
+        Ok(())
+    }
+}
+
+struct AuthorizedFileSet {
+    contract_id: String,
+    proposal_digest: Digest32,
+    files: Vec<VerifiedFile>,
+    directories: Vec<RelativeArtifactPath>,
+}
+
+fn authorize_file_operations(
+    input: &CapsuleInputArgs,
+    identity: &PrivateIdentityArgs,
+    path_override: Option<&str>,
+    required: Capability,
+) -> Result<AuthorizedFileSet, CliError> {
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(input, &limits)?;
+    let contract = envelope.proposal().contract();
+    if !contract.capabilities().contains(required) {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            format!(
+                "access contract does not grant {}",
+                capability_label(required)
+            ),
+        ));
+    }
+    let identity = unlock_identity(identity)?;
+    let opened = open_capsule(&envelope, &identity, &limits).map_err(chain_error)?;
+    let (files, directories) =
+        artifact_verified_tree(opened.artifact_binary(), path_override, &limits)?;
+    Ok(AuthorizedFileSet {
+        contract_id: opened.contract_id().to_base64(),
+        proposal_digest: Digest32(*opened.proposal_id()),
+        files,
+        directories,
+    })
+}
+
+fn artifact_verified_tree(
+    artifact_binary: &[u8],
+    path_override: Option<&str>,
+    limits: &ChainLimits,
+) -> Result<(Vec<VerifiedFile>, Vec<RelativeArtifactPath>), CliError> {
+    let decoded = decode_artifact(artifact_binary, &limits.artifact).map_err(|error| {
+        CliError::new(
+            EXIT_DIGEST,
+            format!("cannot verify decrypted artifact: {error}"),
+        )
+    })?;
+    let artifact = decoded.artifact();
+    match artifact.kind() {
+        ArtifactKind::File => {
+            let entry = artifact
+                .entries()
+                .first()
+                .filter(|entry| entry.kind() == ArtifactEntryKind::File)
+                .ok_or_else(|| CliError::new(EXIT_MALFORMED, "invalid file artifact shape"))?;
+            let path = if let Some(path) = path_override {
+                RelativeArtifactPath::new(path)
+            } else if let Some(path) = artifact.suggested_path() {
+                Ok(path.clone())
+            } else if let Some(name) = artifact.suggested_name() {
+                RelativeArtifactPath::new(name)
+            } else {
+                return Err(CliError::new(
+                    EXIT_POLICY,
+                    "single-file artifact has no target; pass --path RELATIVE_PATH",
+                ));
+            }
+            .map_err(|error| {
+                CliError::new(
+                    EXIT_POLICY,
+                    format!("invalid contract-authorized target path: {error}"),
+                )
+            })?;
+            Ok((vec![verified_file(path, entry)], Vec::new()))
+        }
+        ArtifactKind::Directory => {
+            if path_override.is_some() {
+                return Err(CliError::new(
+                    EXIT_POLICY,
+                    "--path is valid only for a single-file artifact; use --root for a directory",
+                ));
+            }
+            let files = artifact
+                .entries()
+                .iter()
+                .filter(|entry| entry.kind() == ArtifactEntryKind::File)
+                .map(|entry| {
+                    entry
+                        .path()
+                        .cloned()
+                        .map(|path| verified_file(path, entry))
+                        .ok_or_else(|| {
+                            CliError::new(EXIT_MALFORMED, "directory file entry has no path")
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let directories = artifact
+                .entries()
+                .iter()
+                .filter(|entry| entry.kind() == ArtifactEntryKind::Directory)
+                .map(|entry| {
+                    entry
+                        .path()
+                        .cloned()
+                        .ok_or_else(|| CliError::new(EXIT_MALFORMED, "directory entry has no path"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((files, directories))
+        }
+    }
+}
+
+fn verified_file(path: RelativeArtifactPath, entry: &rebyte_core::ArtifactEntry) -> VerifiedFile {
+    VerifiedFile {
+        path,
+        bytes: entry.bytes().to_vec(),
+        executable: entry.executable(),
+        content_kind: if core::str::from_utf8(entry.bytes()).is_ok() {
+            FileContentKind::TextUtf8
+        } else {
+            FileContentKind::Binary
+        },
+    }
+}
+
+fn print_directory_diff(directories: &[DirectoryDiffEntry]) {
+    for directory in directories {
+        println!(
+            "{}  {}/",
+            match directory.kind {
+                DirectoryChangeKind::Create => "CREATE-DIR",
+                DirectoryChangeKind::Unchanged => "UNCHANGED-DIR",
+                _ => "UNKNOWN-DIR",
+            },
+            directory.path
+        );
+    }
+}
+
+const fn capability_label(capability: Capability) -> &'static str {
+    match capability {
+        Capability::InspectMetadata => "metadata inspection",
+        Capability::Decrypt => "decryption",
+        Capability::Reconstruct => "reconstruction",
+        Capability::Diff => "diff",
+        Capability::Apply => "transactional apply",
+        Capability::ApplySemanticPatch => "semantic patch application",
+        _ => "the requested operation",
     }
 }
 
@@ -1057,6 +1374,130 @@ struct OpenReport {
     artifact_bytes: usize,
     raw_artifact: bool,
     output: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChainDiffJson {
+    schema_version: u16,
+    contract_id: String,
+    proposal_id: String,
+    diff: super::DiffJson,
+    directories: Vec<DirectoryDiffJson>,
+}
+
+impl ChainDiffJson {
+    fn new(
+        authorized: &AuthorizedFileSet,
+        report: &DiffReport,
+        directories: &[DirectoryDiffEntry],
+    ) -> Self {
+        Self {
+            schema_version: 2,
+            contract_id: authorized.contract_id.clone(),
+            proposal_id: encode(authorized.proposal_digest.as_bytes()),
+            diff: super::DiffJson::from_report(report),
+            directories: directory_diff_json(directories),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectoryDiffJson {
+    path: String,
+    kind: &'static str,
+}
+
+fn directory_diff_json(directories: &[DirectoryDiffEntry]) -> Vec<DirectoryDiffJson> {
+    directories
+        .iter()
+        .map(|directory| DirectoryDiffJson {
+            path: directory.path.as_str().to_string(),
+            kind: match directory.kind {
+                DirectoryChangeKind::Create => "create",
+                DirectoryChangeKind::Unchanged => "unchanged",
+                _ => "unknown",
+            },
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChainApplyJson {
+    schema_version: u16,
+    contract_id: String,
+    proposal_id: String,
+    status: &'static str,
+    dry_run: bool,
+    diff: super::DiffJson,
+    directories: Vec<DirectoryDiffJson>,
+    transaction_id: Option<String>,
+    files_written: usize,
+    directories_ensured: usize,
+    bytes_written: u64,
+    retained_backup: Option<String>,
+}
+
+impl ChainApplyJson {
+    fn preview(
+        authorized: &AuthorizedFileSet,
+        diff: &DiffReport,
+        directories: &[DirectoryDiffEntry],
+    ) -> Self {
+        Self::new(authorized, diff, directories, "preview", true, None)
+    }
+
+    fn cancelled(
+        authorized: &AuthorizedFileSet,
+        diff: &DiffReport,
+        directories: &[DirectoryDiffEntry],
+    ) -> Self {
+        Self::new(authorized, diff, directories, "cancelled", false, None)
+    }
+
+    fn applied(
+        authorized: &AuthorizedFileSet,
+        diff: &DiffReport,
+        directories: &[DirectoryDiffEntry],
+        report: &ApplyReport,
+    ) -> Self {
+        Self::new(
+            authorized,
+            diff,
+            directories,
+            "applied",
+            false,
+            Some(report),
+        )
+    }
+
+    fn new(
+        authorized: &AuthorizedFileSet,
+        diff: &DiffReport,
+        directories: &[DirectoryDiffEntry],
+        status: &'static str,
+        dry_run: bool,
+        report: Option<&ApplyReport>,
+    ) -> Self {
+        Self {
+            schema_version: 2,
+            contract_id: authorized.contract_id.clone(),
+            proposal_id: encode(authorized.proposal_digest.as_bytes()),
+            status,
+            dry_run,
+            diff: super::DiffJson::from_report(diff),
+            directories: directory_diff_json(directories),
+            transaction_id: report.map(|value| value.transaction_id.clone()),
+            files_written: report.map_or(0, |value| value.files_written),
+            directories_ensured: report.map_or(0, |value| value.directories_ensured),
+            bytes_written: report.map_or(0, |value| value.bytes_written),
+            retained_backup: report
+                .and_then(|value| value.retained_backup.as_ref())
+                .map(|value| value.display().to_string()),
+        }
+    }
 }
 
 fn capability_names(proposal: &CapsuleProposal) -> Vec<&'static str> {

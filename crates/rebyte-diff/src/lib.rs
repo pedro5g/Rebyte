@@ -71,6 +71,25 @@ pub struct DiffReport {
     pub summary: DiffSummary,
 }
 
+/// High-level effect an explicit verified directory would have.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DirectoryChangeKind {
+    /// Directory does not exist and would be created.
+    Create,
+    /// Directory already exists.
+    Unchanged,
+}
+
+/// Comparison result for one explicit artifact directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectoryDiffEntry {
+    /// Portable verified directory path.
+    pub path: RelativeArtifactPath,
+    /// Planned directory effect.
+    pub kind: DirectoryChangeKind,
+}
+
 /// Compares a fully verified capsule with a capability-confined local root.
 ///
 /// # Errors
@@ -78,16 +97,64 @@ pub struct DiffReport {
 /// Returns [`DiffError`] when the root cannot be opened, a target is a symlink
 /// or non-file, a confined read fails, or a length cannot be represented.
 pub fn diff_capsule(capsule: &FullyVerifiedCapsule, root: &Path) -> Result<DiffReport, DiffError> {
+    diff_verified_files(capsule.files(), root)
+}
+
+/// Compares an independently authenticated set of files with a confined root.
+///
+/// This is the composition point used by encrypted Chain artifacts after
+/// their contract, recipient slot, AEAD and inner artifact have all verified.
+/// The caller is responsible for retaining the authorization typestate.
+///
+/// # Errors
+///
+/// Returns [`DiffError`] under the same filesystem and length conditions as
+/// [`diff_capsule`].
+pub fn diff_verified_files(files: &[VerifiedFile], root: &Path) -> Result<DiffReport, DiffError> {
     let directory = Dir::open_ambient_dir(root, ambient_authority())
         .map_err(|error| DiffError::Root(error.kind()))?;
     let mut report = DiffReport::default();
-    for file in capsule.files() {
+    for file in files {
         let existing = read_existing(&directory, file.path.as_str())?;
         let entry = compare_file(file, existing.as_deref())?;
         accumulate(&mut report.summary, &entry)?;
         report.entries.push(entry);
     }
     Ok(report)
+}
+
+/// Compares explicit authenticated directories with a confined local root.
+///
+/// # Errors
+///
+/// Returns [`DiffError`] if a path is a symlink, an existing target is not a
+/// directory or confined metadata access fails.
+pub fn diff_verified_directories(
+    directories: &[RelativeArtifactPath],
+    root: &Path,
+) -> Result<Vec<DirectoryDiffEntry>, DiffError> {
+    let root = Dir::open_ambient_dir(root, ambient_authority())
+        .map_err(|error| DiffError::Root(error.kind()))?;
+    directories
+        .iter()
+        .map(|path| {
+            let kind = match root.symlink_metadata(path.as_str()) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(DiffError::SymlinkTarget);
+                }
+                Ok(metadata) if !metadata.is_dir() => return Err(DiffError::NotDirectory),
+                Ok(_) => DirectoryChangeKind::Unchanged,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    DirectoryChangeKind::Create
+                }
+                Err(error) => return Err(DiffError::Io(error.kind())),
+            };
+            Ok(DirectoryDiffEntry {
+                path: path.clone(),
+                kind,
+            })
+        })
+        .collect()
 }
 
 /// Read-only diff failure.
@@ -102,6 +169,8 @@ pub enum DiffError {
     SymlinkTarget,
     /// Final target existed but was not a regular file.
     NotRegularFile,
+    /// Explicit directory target existed but was not a directory.
+    NotDirectory,
     /// Platform length conversion or summary arithmetic overflowed.
     LengthOverflow,
 }
@@ -113,6 +182,7 @@ impl fmt::Display for DiffError {
             Self::Io(kind) => write!(formatter, "cannot read confined target: {kind}"),
             Self::SymlinkTarget => formatter.write_str("target is a symbolic link"),
             Self::NotRegularFile => formatter.write_str("target is not a regular file"),
+            Self::NotDirectory => formatter.write_str("directory target is not a directory"),
             Self::LengthOverflow => formatter.write_str("diff length overflow"),
         }
     }
@@ -257,7 +327,9 @@ mod tests {
     use rebyte_format::{ContentKind, RelativeArtifactPath};
     use rebyte_verify::VerifiedFile;
 
-    use super::{ChangeKind, DiffError, compare_file};
+    use super::{
+        ChangeKind, DiffError, DirectoryChangeKind, compare_file, diff_verified_directories,
+    };
 
     fn text_file() -> Result<VerifiedFile, rebyte_format::PathError> {
         Ok(VerifiedFile {
@@ -299,6 +371,23 @@ mod tests {
         let entry = compare_file(&file, None)?;
         assert_eq!(entry.kind, ChangeKind::Create);
         assert!(entry.unified_text.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_directory_diff_reports_create_and_unchanged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join("existing"))?;
+        let entries = diff_verified_directories(
+            &[
+                RelativeArtifactPath::new("existing")?,
+                RelativeArtifactPath::new("missing")?,
+            ],
+            root.path(),
+        )?;
+        assert_eq!(entries[0].kind, DirectoryChangeKind::Unchanged);
+        assert_eq!(entries[1].kind, DirectoryChangeKind::Create);
         Ok(())
     }
 }

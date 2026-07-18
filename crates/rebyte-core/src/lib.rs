@@ -5,7 +5,8 @@
 
 pub use rebyte_apply::{
     ApplyError, ApplyOptions, ApplyReport, TransactionState, TransactionSummary, apply_transaction,
-    list_transactions, resume_transaction, rollback_transaction,
+    apply_verified_files, apply_verified_tree, list_transactions, resume_transaction,
+    rollback_transaction,
 };
 pub use rebyte_artifact_token::{
     ARTIFACT_HEADER_SIZE, ARTIFACT_TOKEN_PREFIX, Artifact, ArtifactCompression, ArtifactDictionary,
@@ -25,7 +26,10 @@ pub use rebyte_chain::{
     create_capsule_proposal_with_contract, finalize_capsule, finalize_group, generate_identity,
     open_capsule,
 };
-pub use rebyte_diff::{ChangeKind, DiffEntry, DiffError, DiffReport, DiffSummary, diff_capsule};
+pub use rebyte_diff::{
+    ChangeKind, DiffEntry, DiffError, DiffReport, DiffSummary, DirectoryChangeKind,
+    DirectoryDiffEntry, diff_capsule, diff_verified_directories, diff_verified_files,
+};
 pub use rebyte_file_token::{
     CompressionProfile, DecodedFileToken, EncodedFileToken, FILE_TOKEN_HEADER_SIZE,
     FILE_TOKEN_PREFIX, FileTokenCompression, FileTokenError, FileTokenOptions, decode_file_token,

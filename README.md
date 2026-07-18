@@ -264,6 +264,18 @@ rebyte chain capsule inspect --file project.rbe
 rebyte chain capsule open --file project.rbe \
   --private-key alice.rbk --passphrase-file alice.passphrase \
   --output ./project-restored
+
+rebyte chain capsule diff --file project.rbe \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --root ./existing-project
+
+rebyte chain capsule apply --file project.rbe \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --root ./existing-project --dry-run
+
+rebyte chain capsule apply --file project.rbe \
+  --private-key alice.rbk --passphrase-file alice.passphrase \
+  --root ./existing-project --yes --backup
 ```
 
 Capsule approval authorizes creation of that exact envelope; it is not a fresh

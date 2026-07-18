@@ -365,6 +365,39 @@ The capsule threshold authorizes creation of the envelope; envelope v2 direct
 release does not require fresh member participation for every open. Time and
 maximum-release policies are rejected until quorum release is implemented.
 
+### `chain capsule diff`
+
+```text
+rebyte chain capsule diff --file CAPSULE.rbe
+  --private-key RECIPIENT.rbk [--passphrase-file PATH]
+  --root DIRECTORY [--path SINGLE_FILE_TARGET] [--json]
+```
+
+Requires the contract's `diff` capability. The CLI verifies consensus,
+contract, recipient HPKE, payload AEAD and the inner `.rba` before comparing
+files and explicit directories through the confined read-only diff engine.
+`--path` overrides approved name metadata only for a single-file artifact;
+`--root` selects the destination root for a directory artifact.
+
+### `chain capsule apply`
+
+```text
+rebyte chain capsule apply --file CAPSULE.rbe
+  --private-key RECIPIENT.rbk [--passphrase-file PATH]
+  --root DIRECTORY [--path SINGLE_FILE_TARGET]
+  [--dry-run | --yes] [--backup] [--json]
+```
+
+Requires the contract's `apply` capability. Unless `--yes` is supplied, Rebyte
+shows the verified diff and asks for confirmation. `--dry-run` performs every
+cryptographic and read-only filesystem check without writing.
+
+Application reuses the same persistent journal, staging, precondition digest,
+per-file atomic rename, post-write digest and rollback engine as signed RAP.
+Explicit empty directories are journaled before creation and are removed on
+rollback when they did not exist before the transaction. `--backup` retains
+the committed journal and original bytes for an explicit later rollback.
+
 ## Consumer commands
 
 ### `inspect`

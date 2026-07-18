@@ -74,6 +74,8 @@ pub struct ApplyReport {
     pub transaction_id: String,
     /// Number of target files atomically replaced.
     pub files_written: usize,
+    /// Number of explicit artifact directories verified or created.
+    pub directories_ensured: usize,
     /// Total verified bytes written.
     pub bytes_written: u64,
     /// Relative retained transaction path when backups were requested.
@@ -93,13 +95,61 @@ pub fn apply_transaction(
     root: &Path,
     options: &ApplyOptions,
 ) -> Result<ApplyReport, ApplyError> {
+    apply_verified_files(capsule.capsule_digest(), capsule.files(), root, options)
+}
+
+/// Applies an independently authenticated file set through the same
+/// recoverable transaction engine as a verified RAP capsule.
+///
+/// `source_digest` must identify the complete authorized source object, not
+/// only one file. Chain uses its contract-bound encrypted proposal digest.
+/// The caller is responsible for retaining the authorization typestate and
+/// checking the contract's `apply` capability before calling this function.
+///
+/// # Errors
+///
+/// Returns [`ApplyError`] under the same transaction, confinement, conflict
+/// and verification conditions as [`apply_transaction`].
+pub fn apply_verified_files(
+    source_digest: Digest32,
+    files: &[VerifiedFile],
+    root: &Path,
+    options: &ApplyOptions,
+) -> Result<ApplyReport, ApplyError> {
+    apply_verified_tree(source_digest, files, &[], root, options)
+}
+
+/// Applies authenticated files and explicit directories as one recoverable
+/// tree transaction.
+///
+/// Existing directories are preserved. Missing directories are recorded in
+/// the journal before creation and removed on rollback when still empty.
+///
+/// # Errors
+///
+/// Returns [`ApplyError`] for unsafe, duplicate or conflicting directory
+/// paths and the failures documented by [`apply_verified_files`].
+pub fn apply_verified_tree(
+    source_digest: Digest32,
+    files: &[VerifiedFile],
+    directories: &[RelativeArtifactPath],
+    root: &Path,
+    options: &ApplyOptions,
+) -> Result<ApplyReport, ApplyError> {
     let root = open_root(root)?;
     reject_incomplete_transactions(&root)?;
     let (transactions, transaction_id, transaction) = create_transaction(&root)?;
-    let mut journal = prepare(capsule, &root, &transaction_id, options.retain_backup)?;
+    let mut journal = prepare(
+        source_digest,
+        files,
+        directories,
+        &root,
+        &transaction_id,
+        options.retain_backup,
+    )?;
     persist_journal(&transaction, &journal)?;
 
-    if let Err(error) = stage(capsule.files(), &root, &transaction, &mut journal) {
+    if let Err(error) = stage(files, &root, &transaction, &mut journal) {
         // Windows refuses to remove a transaction tree while this directory
         // capability still owns an open handle to it.
         drop(transaction);
@@ -139,6 +189,7 @@ pub fn apply_transaction(
     Ok(ApplyReport {
         transaction_id,
         files_written: journal.operations.len(),
+        directories_ensured: journal.required_directories.len(),
         bytes_written,
         retained_backup,
     })
@@ -222,6 +273,7 @@ pub fn resume_transaction(root: &Path, transaction_id: &str) -> Result<ApplyRepo
     Ok(ApplyReport {
         transaction_id: transaction_id.to_string(),
         files_written: journal.operations.len(),
+        directories_ensured: journal.required_directories.len(),
         bytes_written,
         retained_backup: Some(PathBuf::from(format!(
             "{CONTROL_DIR}/{TRANSACTIONS_DIR}/{transaction_id}"
@@ -316,7 +368,16 @@ struct Journal {
     committed: usize,
     retain_backup: bool,
     created_directories: Vec<String>,
+    #[serde(default)]
+    required_directories: Vec<JournalDirectory>,
     operations: Vec<JournalOperation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JournalDirectory {
+    path: String,
+    existed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -342,13 +403,16 @@ fn open_root(path: &Path) -> Result<Dir, ApplyError> {
 }
 
 fn prepare(
-    capsule: &FullyVerifiedCapsule,
+    source_digest: Digest32,
+    files: &[VerifiedFile],
+    directories: &[RelativeArtifactPath],
     root: &Dir,
     transaction_id: &str,
     retain_backup: bool,
 ) -> Result<Journal, ApplyError> {
-    let mut operations = Vec::with_capacity(capsule.files().len());
-    for (index, file) in capsule.files().iter().enumerate() {
+    let required_directories = prepare_directories(root, files, directories)?;
+    let mut operations = Vec::with_capacity(files.len());
+    for (index, file) in files.iter().enumerate() {
         let snapshot = read_target(root, &file.path)?;
         let backup = snapshot.as_ref().map(|_| format!("backups/{index:08}.bin"));
         operations.push(JournalOperation {
@@ -365,13 +429,37 @@ fn prepare(
     Ok(Journal {
         schema_version: 1,
         id: transaction_id.to_string(),
-        capsule_digest: capsule.capsule_digest().0,
+        capsule_digest: source_digest.0,
         state: TransactionState::Prepared,
         committed: 0,
         retain_backup,
         created_directories: Vec::new(),
+        required_directories,
         operations,
     })
+}
+
+fn prepare_directories(
+    root: &Dir,
+    files: &[VerifiedFile],
+    directories: &[RelativeArtifactPath],
+) -> Result<Vec<JournalDirectory>, ApplyError> {
+    let mut previous: Option<&str> = None;
+    let mut prepared = Vec::with_capacity(directories.len());
+    for directory in directories {
+        let path = directory.as_str();
+        if previous.is_some_and(|value| value >= path)
+            || files.iter().any(|file| file.path.as_str() == path)
+        {
+            return Err(ApplyError::InvalidJournal);
+        }
+        prepared.push(JournalDirectory {
+            path: path.to_string(),
+            existed: directory_exists(root, directory)?,
+        });
+        previous = Some(path);
+    }
+    Ok(prepared)
 }
 
 fn create_transaction(root: &Dir) -> Result<(Dir, String, Dir), ApplyError> {
@@ -510,6 +598,12 @@ fn commit(root: &Dir, transaction: &Dir, journal: &mut Journal) -> Result<(), Ap
     verify_staged(transaction, journal)?;
     journal.state = TransactionState::Committing;
     persist_journal(transaction, journal)?;
+    for directory in journal.required_directories.clone() {
+        let path =
+            RelativeArtifactPath::new(&directory.path).map_err(|_| ApplyError::InvalidJournal)?;
+        ensure_directory(root, &path, &mut journal.created_directories)?;
+        persist_journal(transaction, journal)?;
+    }
     for index in journal.committed..journal.operations.len() {
         let operation = journal
             .operations
@@ -570,7 +664,18 @@ fn verify_precondition(
 fn rollback(root: &Dir, transaction: &Dir, journal: &mut Journal) -> Result<(), ApplyError> {
     journal.state = TransactionState::RollingBack;
     persist_journal(transaction, journal)?;
-    for operation in journal.operations.iter().rev() {
+    let possible_count = journal
+        .committed
+        .checked_add(1)
+        .ok_or(ApplyError::LengthOverflow)?
+        .min(journal.operations.len());
+    for (index, operation) in journal
+        .operations
+        .iter()
+        .take(possible_count)
+        .enumerate()
+        .rev()
+    {
         let path =
             RelativeArtifactPath::new(&operation.target).map_err(|_| ApplyError::InvalidJournal)?;
         let current = read_target(root, &path)?;
@@ -582,6 +687,12 @@ fn rollback(root: &Dir, transaction: &Dir, journal: &mut Journal) -> Result<(), 
                 )
         });
         if !is_new {
+            if index == journal.committed {
+                // The boundary operation failed its precondition before Rebyte
+                // renamed anything. Its current state belongs to the caller
+                // or a concurrent writer and is deliberately left untouched.
+                continue;
+            }
             if operation.original_digest.is_none() && current.is_none() {
                 continue;
             }
@@ -591,6 +702,11 @@ fn rollback(root: &Dir, transaction: &Dir, journal: &mut Journal) -> Result<(), 
             {
                 continue;
             }
+            // A concurrent writer owns this unrecognized target state. Leave
+            // its bytes untouched, but remove transaction-created directories
+            // when they are still empty before reporting the conflict.
+            remove_created_directories(root, &journal.created_directories);
+            remove_required_directories(root, &journal.required_directories);
             return Err(ApplyError::Conflict);
         }
         if let (Some(backup), Some(original_digest)) =
@@ -619,6 +735,7 @@ fn rollback(root: &Dir, transaction: &Dir, journal: &mut Journal) -> Result<(), 
         }
     }
     remove_created_directories(root, &journal.created_directories);
+    remove_required_directories(root, &journal.required_directories);
     journal.committed = 0;
     journal.state = TransactionState::RolledBack;
     persist_journal(transaction, journal)
@@ -683,6 +800,62 @@ fn read_target(
         bytes,
         executable: is_executable(&metadata),
     }))
+}
+
+fn directory_exists(root: &Dir, path: &RelativeArtifactPath) -> Result<bool, ApplyError> {
+    let mut current = root
+        .try_clone()
+        .map_err(|error| ApplyError::Io(error.kind()))?;
+    for component in path.as_str().split('/') {
+        match current.symlink_metadata(component) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Err(ApplyError::Symlink),
+            Ok(metadata) if !metadata.is_dir() => return Err(ApplyError::NotRegularFile),
+            Ok(_) => {
+                current = current
+                    .open_dir_nofollow(component)
+                    .map_err(|error| ApplyError::Io(error.kind()))?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(ApplyError::Io(error.kind())),
+        }
+    }
+    Ok(true)
+}
+
+fn ensure_directory(
+    root: &Dir,
+    path: &RelativeArtifactPath,
+    created_directories: &mut Vec<String>,
+) -> Result<(), ApplyError> {
+    let mut current = root
+        .try_clone()
+        .map_err(|error| ApplyError::Io(error.kind()))?;
+    let mut accumulated = String::new();
+    for component in path.as_str().split('/') {
+        if !accumulated.is_empty() {
+            accumulated.push('/');
+        }
+        accumulated.push_str(component);
+        match current.symlink_metadata(component) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Err(ApplyError::Symlink),
+            Ok(metadata) if !metadata.is_dir() => return Err(ApplyError::NotRegularFile),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                current
+                    .create_dir(component)
+                    .map_err(|error| ApplyError::Io(error.kind()))?;
+                sync_directory(&current)?;
+                if !created_directories.iter().any(|path| path == &accumulated) {
+                    created_directories.push(accumulated.clone());
+                }
+            }
+            Err(error) => return Err(ApplyError::Io(error.kind())),
+        }
+        current = current
+            .open_dir_nofollow(component)
+            .map_err(|error| ApplyError::Io(error.kind()))?;
+    }
+    Ok(())
 }
 
 fn atomic_replace(
@@ -878,6 +1051,19 @@ fn validate_journal(journal: &Journal) -> Result<(), ApplyError> {
     for directory in &journal.created_directories {
         RelativeArtifactPath::new(directory).map_err(|_| ApplyError::InvalidJournal)?;
     }
+    let mut previous: Option<&str> = None;
+    for directory in &journal.required_directories {
+        RelativeArtifactPath::new(&directory.path).map_err(|_| ApplyError::InvalidJournal)?;
+        if previous.is_some_and(|value| value >= directory.path.as_str())
+            || journal
+                .operations
+                .iter()
+                .any(|operation| operation.target == directory.path)
+        {
+            return Err(ApplyError::InvalidJournal);
+        }
+        previous = Some(&directory.path);
+    }
     Ok(())
 }
 
@@ -895,6 +1081,12 @@ fn cleanup_transaction(transactions: &Dir, id: &str) -> Result<(), ApplyError> {
 fn remove_created_directories(root: &Dir, directories: &[String]) {
     for directory in directories.iter().rev() {
         let _result = root.remove_dir(directory);
+    }
+}
+
+fn remove_required_directories(root: &Dir, directories: &[JournalDirectory]) {
+    for directory in directories.iter().rev().filter(|value| !value.existed) {
+        let _result = root.remove_dir(&directory.path);
     }
 }
 
@@ -944,7 +1136,7 @@ mod tests {
     use std::fs;
 
     use ed25519_dalek::SigningKey;
-    use rebyte_format::CompressionAlgorithm;
+    use rebyte_format::{CompressionAlgorithm, RelativeArtifactPath};
     use rebyte_pack::{ArtifactFile, PackOptions, pack};
     use rebyte_signature::{
         KeyStatus, Signer, TrustChannel, TrustedKeyring, TrustedPublicKey, VerificationPolicy,
@@ -953,7 +1145,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ApplyError, ApplyOptions, apply_transaction, list_transactions, rollback_transaction,
+        ApplyError, ApplyOptions, apply_transaction, apply_verified_tree, list_transactions,
+        rollback_transaction,
     };
 
     struct TestSigner(SigningKey);
@@ -1040,6 +1233,29 @@ mod tests {
     }
 
     #[test]
+    fn creates_explicit_empty_directories_transactionally() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempdir()?;
+        let verified = verified_fixture()?;
+        let directories = [
+            RelativeArtifactPath::new("empty")?,
+            RelativeArtifactPath::new("nested/also-empty")?,
+        ];
+        let report = apply_verified_tree(
+            verified.capsule_digest(),
+            verified.files(),
+            &directories,
+            directory.path(),
+            &ApplyOptions::default(),
+        )?;
+        assert_eq!(report.directories_ensured, 2);
+        assert!(directory.path().join("empty").is_dir());
+        assert!(directory.path().join("nested/also-empty").is_dir());
+        assert!(list_transactions(directory.path())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn retained_transaction_rolls_back_to_exact_original_state()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempdir()?;
@@ -1094,7 +1310,14 @@ mod tests {
         let verified = verified_fixture()?;
         let root = super::open_root(directory.path())?;
         let (_transactions, transaction_id, transaction) = super::create_transaction(&root)?;
-        let mut journal = super::prepare(&verified, &root, &transaction_id, true)?;
+        let mut journal = super::prepare(
+            verified.capsule_digest(),
+            verified.files(),
+            &[],
+            &root,
+            &transaction_id,
+            true,
+        )?;
         super::persist_journal(&transaction, &journal)?;
         super::stage(verified.files(), &root, &transaction, &mut journal)?;
         super::persist_journal(&transaction, &journal)?;
@@ -1118,7 +1341,15 @@ mod tests {
         let verified = verified_fixture()?;
         let root = super::open_root(directory.path())?;
         let (_transactions, transaction_id, transaction) = super::create_transaction(&root)?;
-        let mut journal = super::prepare(&verified, &root, &transaction_id, true)?;
+        let required_directories = [RelativeArtifactPath::new("empty-before-conflict")?];
+        let mut journal = super::prepare(
+            verified.capsule_digest(),
+            verified.files(),
+            &required_directories,
+            &root,
+            &transaction_id,
+            true,
+        )?;
         super::persist_journal(&transaction, &journal)?;
         super::stage(verified.files(), &root, &transaction, &mut journal)?;
         super::persist_journal(&transaction, &journal)?;
@@ -1136,6 +1367,9 @@ mod tests {
             b"concurrent change\n"
         );
         assert!(!directory.path().join("nested/created.bin").exists());
+        assert!(directory.path().join("empty-before-conflict").is_dir());
+        super::rollback(&root, &transaction, &mut journal)?;
+        assert!(!directory.path().join("empty-before-conflict").exists());
         Ok(())
     }
 

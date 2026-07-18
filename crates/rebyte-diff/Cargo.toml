@@ -16,5 +16,8 @@ rebyte-format = { path = "../rebyte-format", version = "1.0.0" }
 rebyte-verify = { path = "../rebyte-verify", version = "1.0.0" }
 similar.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

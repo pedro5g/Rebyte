@@ -410,7 +410,7 @@ group ratchet.
 ```console
 rebyte chain identity generate|inspect
 rebyte chain group create|accept|finalize|inspect
-rebyte chain capsule create|approve|finalize|inspect|open
+rebyte chain capsule create|approve|finalize|inspect|open|diff|apply
 ```
 
 Every output is created exclusively and never replaces an existing path. JSON
@@ -429,7 +429,9 @@ Completed gates:
 4. one ciphertext for canonical multi-recipient delivery;
 5. exact-proposal `T-of-N` approvals with duplicate and replay rejection;
 6. native Rust facade, complete CLI workflow and end-to-end reconstruction;
-7. mutation, representative truncation, wrong-key, threshold and fuzz-harness
+7. contract-gated diff and recoverable apply, including explicit empty
+   directories and the cross-platform transaction journal;
+8. mutation, representative truncation, wrong-key, threshold and fuzz-harness
    coverage.
 
 Remaining independent gates:

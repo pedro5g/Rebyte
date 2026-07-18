@@ -15,7 +15,9 @@ fn consensus_capsule_reconstructs_directory_exactly() -> Result<(), Box<dyn std:
     let directory = tempdir()?;
     let source = directory.path().join("source");
     let restored = directory.path().join("restored");
+    let applied = directory.path().join("applied");
     fs::create_dir(&source)?;
+    fs::create_dir(&applied)?;
     fs::create_dir(source.join("empty"))?;
     fs::write(
         source.join("message.txt"),
@@ -217,6 +219,80 @@ fn consensus_capsule_reconstructs_directory_exactly() -> Result<(), Box<dyn std:
         .output()?;
     assert_success(&inspected_capsule);
     assert!(stdout_text(&inspected_capsule).contains("\"finalized\": true"));
+    assert!(stdout_text(&inspected_capsule).contains("\"contractId\""));
+    assert!(stdout_text(&inspected_capsule).contains("\"releasePolicy\": \"directRecipients\""));
+
+    let diff = rebyte()
+        .args([
+            "chain",
+            "capsule",
+            "diff",
+            "--file",
+            path_text(&capsule)?,
+            "--private-key",
+            path_text(&private)?,
+            "--passphrase-file",
+            path_text(&passphrase)?,
+            "--root",
+            path_text(&applied)?,
+            "--json",
+        ])
+        .output()?;
+    assert_success(&diff);
+    assert!(stdout_text(&diff).contains("\"kind\": \"create\""));
+    assert!(stdout_text(&diff).contains("\"path\": \"empty\""));
+
+    let dry_run = rebyte()
+        .args([
+            "chain",
+            "capsule",
+            "apply",
+            "--file",
+            path_text(&capsule)?,
+            "--private-key",
+            path_text(&private)?,
+            "--passphrase-file",
+            path_text(&passphrase)?,
+            "--root",
+            path_text(&applied)?,
+            "--dry-run",
+            "--json",
+        ])
+        .output()?;
+    assert_success(&dry_run);
+    assert!(stdout_text(&dry_run).contains("\"status\": \"preview\""));
+    assert!(!applied.join("message.txt").exists());
+    assert!(!applied.join("empty").exists());
+
+    let apply = rebyte()
+        .args([
+            "chain",
+            "capsule",
+            "apply",
+            "--file",
+            path_text(&capsule)?,
+            "--private-key",
+            path_text(&private)?,
+            "--passphrase-file",
+            path_text(&passphrase)?,
+            "--root",
+            path_text(&applied)?,
+            "--yes",
+            "--json",
+        ])
+        .output()?;
+    assert_success(&apply);
+    assert!(stdout_text(&apply).contains("\"status\": \"applied\""));
+    assert!(stdout_text(&apply).contains("\"directoriesEnsured\": 1"));
+    assert_eq!(
+        fs::read(applied.join("message.txt"))?,
+        fs::read(source.join("message.txt"))?
+    );
+    assert_eq!(
+        fs::read(applied.join("binary.dat"))?,
+        fs::read(source.join("binary.dat"))?
+    );
+    assert!(applied.join("empty").is_dir());
 
     assert_success(
         &rebyte()

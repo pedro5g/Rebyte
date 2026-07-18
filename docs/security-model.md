@@ -77,7 +77,11 @@ Opening verifies the canonical envelope, group formation, approval threshold,
 all commitments and the exact recipient before HPKE decapsulation. Plaintext is
 released only after payload authentication, exact length/digest checks and
 full inner `.rba` decoding. CLI reconstruction uses exclusive output creation
-and does not overwrite an existing path.
+and does not overwrite an existing path. Contract-gated Chain diff and apply
+convert the verified inner artifact into authenticated file/directory entries,
+then reuse the capability-confined transaction engine. Empty directories are
+journaled before creation; file staging, precondition checks, per-file renames,
+post-write verification and rollback retain the same guarantees as signed RAP.
 
 The capsule threshold authorizes envelope creation. Direct release is not a threshold
 secret-sharing scheme and does not require members to approve every future

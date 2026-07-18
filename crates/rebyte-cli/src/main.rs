@@ -767,6 +767,7 @@ struct ApplyReportJson {
     applied: bool,
     transaction_id: String,
     files_written: usize,
+    directories_ensured: usize,
     bytes_written: u64,
     retained_backup: Option<String>,
 }
@@ -778,6 +779,7 @@ impl ApplyReportJson {
             applied: true,
             transaction_id: report.transaction_id.clone(),
             files_written: report.files_written,
+            directories_ensured: report.directories_ensured,
             bytes_written: report.bytes_written,
             retained_backup: report
                 .retained_backup
