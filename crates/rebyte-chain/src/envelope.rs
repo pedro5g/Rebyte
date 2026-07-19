@@ -1490,7 +1490,7 @@ pub(super) fn opened_content(decrypted: DecryptedContent) -> Result<OpenedConten
 
 // Callers must have validated the proposal that produced `group_id` on the
 // current data.
-fn verify_capsule_approval(
+pub(super) fn verify_capsule_approval(
     group_id: &GroupId,
     proposal: &CapsuleProposal,
     approval: &CapsuleApproval,

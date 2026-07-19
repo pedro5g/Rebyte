@@ -428,7 +428,7 @@ pub fn finalize_group(
 
 // Callers must have validated the proposal that produced `group_id` and every
 // listed member on the current data.
-fn verify_acceptance(
+pub(crate) fn verify_acceptance(
     group_id: &GroupId,
     member: &IdentityPublicDocument,
     acceptance: &GroupAcceptance,

@@ -17,12 +17,12 @@ use rebyte_chain::{
     IdentityBackupShare, IdentityId, IdentityPublicDocument, IdentityStatus,
     IdentityStatusDocument, OpenedContent, QuorumProposalOptions, ReleaseGrant, ReleasePolicy,
     ReleaseRequest, TrustedClock, UnlockedIdentity, accept_group, approve_capsule, backup_identity,
-    create_capsule_proposal, create_challenge_award, create_challenge_capsule_proposal,
-    create_challenge_claim, create_quorum_capsule_proposal, create_quorum_semantic_patch_proposal,
-    create_release_request, create_semantic_patch_proposal, deny_statused_identities,
-    finalize_capsule, finalize_group, generate_identity, grant_release, issue_identity_status,
-    open_capsule, open_challenge_content, open_quorum_content, open_semantic_patch,
-    restore_identity, verify_challenge_claim,
+    capsule_ceremony_status, create_capsule_proposal, create_challenge_award,
+    create_challenge_capsule_proposal, create_challenge_claim, create_quorum_capsule_proposal,
+    create_quorum_semantic_patch_proposal, create_release_request, create_semantic_patch_proposal,
+    deny_statused_identities, finalize_capsule, finalize_group, generate_identity, grant_release,
+    group_ceremony_status, issue_identity_status, open_capsule, open_challenge_content,
+    open_quorum_content, open_semantic_patch, restore_identity, verify_challenge_claim,
 };
 use rebyte_core::{
     ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
@@ -63,6 +63,44 @@ enum ChainSubcommand {
     Release(ReleaseCommand),
     /// Solve, claim and award open computational challenges.
     Challenge(ChallengeCommand),
+    /// Report signature-collection progress before finalization.
+    Ceremony(CeremonyCommand),
+}
+
+#[derive(Debug, Args)]
+struct CeremonyCommand {
+    #[command(subcommand)]
+    command: CeremonySubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CeremonySubcommand {
+    /// Show who has signed and what finalization still needs.
+    Status(CeremonyStatusCommand),
+}
+
+#[derive(Debug, Args)]
+struct CeremonyStatusCommand {
+    /// Group proposal awaiting unanimous member acceptances.
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "capsule",
+        conflicts_with = "capsule"
+    )]
+    group: Option<PathBuf>,
+    /// Member acceptance collected so far; repeat per document.
+    #[arg(long = "acceptance", value_name = "PATH", conflicts_with = "capsule")]
+    acceptances: Vec<PathBuf>,
+    /// Encrypted capsule proposal awaiting threshold approvals.
+    #[arg(long, value_name = "PATH")]
+    capsule: Option<PathBuf>,
+    /// Member capsule approval collected so far; repeat per document.
+    #[arg(long = "approval", value_name = "PATH", conflicts_with = "group")]
+    approvals: Vec<PathBuf>,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -678,6 +716,112 @@ pub(super) fn run(command: &ChainCommand) -> Result<(), CliError> {
         ChainSubcommand::Capsule(command) => run_capsule(command),
         ChainSubcommand::Release(command) => run_release(command),
         ChainSubcommand::Challenge(command) => run_challenge(command),
+        ChainSubcommand::Ceremony(command) => run_ceremony(command),
+    }
+}
+
+fn run_ceremony(command: &CeremonyCommand) -> Result<(), CliError> {
+    match &command.command {
+        CeremonySubcommand::Status(command) => ceremony_status_command(command),
+    }
+}
+
+fn ceremony_status_command(command: &CeremonyStatusCommand) -> Result<(), CliError> {
+    let limits = ChainLimits::STANDARD;
+    let (heading, ceremony, status, supplied) = if let Some(path) = &command.capsule {
+        let proposal = read_capsule_proposal(path, &limits)?;
+        let approvals = command
+            .approvals
+            .iter()
+            .map(|path| read_capsule_approval(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let status =
+            capsule_ceremony_status(&proposal, &approvals, &limits).map_err(chain_error)?;
+        (
+            "Capsule approval ceremony",
+            "capsule-approval",
+            status,
+            &command.approvals,
+        )
+    } else if let Some(path) = &command.group {
+        let proposal = read_group_proposal(path)?;
+        let acceptances = command
+            .acceptances
+            .iter()
+            .map(|path| read_group_acceptance(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let status = group_ceremony_status(&proposal, &acceptances).map_err(chain_error)?;
+        (
+            "Group formation ceremony",
+            "group-formation",
+            status,
+            &command.acceptances,
+        )
+    } else {
+        return Err(CliError::new(
+            EXIT_GENERIC,
+            "provide --group or --capsule to select a ceremony",
+        ));
+    };
+    let report = CeremonyStatusReport {
+        schema_version: 1,
+        ceremony,
+        required_signatures: status.required_signatures(),
+        collected_signatures: status.collected_signatures(),
+        ready: status.ready(),
+        members: status
+            .members()
+            .iter()
+            .map(|member| CeremonyMemberReport {
+                display_name: member.display_name().to_string(),
+                identity_id: member.identity_id().to_base64(),
+                signed: member.signed(),
+            })
+            .collect(),
+        rejected_documents: status
+            .rejected_documents()
+            .iter()
+            .map(|rejected| CeremonyRejectedReport {
+                path: supplied.get(rejected.index()).map_or_else(
+                    || format!("document {}", rejected.index()),
+                    |path| path.display().to_string(),
+                ),
+                reason: rejected.error().to_string(),
+            })
+            .collect(),
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::heading(heading));
+        println!(
+            "  Signatures   {} of {} required",
+            report.collected_signatures, report.required_signatures
+        );
+        println!("  Members");
+        for member in &report.members {
+            println!(
+                "    {} {}  {}{}",
+                if member.signed { "✓" } else { "·" },
+                member.display_name,
+                member.identity_id,
+                if member.signed { "" } else { "  (pending)" }
+            );
+        }
+        for rejected in &report.rejected_documents {
+            println!("  Rejected     {}: {}", rejected.path, rejected.reason);
+        }
+        if report.ready {
+            println!("  Ready        every required signature collected; finalize now");
+        } else {
+            println!(
+                "  Ready        no; {} more distinct signature(s) needed",
+                report
+                    .required_signatures
+                    .saturating_sub(report.collected_signatures)
+            );
+        }
+        Ok(())
     }
 }
 
@@ -800,6 +944,33 @@ struct ChallengeClaimReport {
     solver: String,
     solver_id: String,
     output: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CeremonyStatusReport {
+    schema_version: u16,
+    ceremony: &'static str,
+    required_signatures: usize,
+    collected_signatures: usize,
+    ready: bool,
+    members: Vec<CeremonyMemberReport>,
+    rejected_documents: Vec<CeremonyRejectedReport>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CeremonyMemberReport {
+    display_name: String,
+    identity_id: String,
+    signed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CeremonyRejectedReport {
+    path: String,
+    reason: String,
 }
 
 #[derive(Serialize)]

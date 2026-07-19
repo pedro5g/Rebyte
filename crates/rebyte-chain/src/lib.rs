@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod backup;
+mod ceremony;
 mod challenge;
 mod codec;
 mod envelope;
@@ -25,6 +26,10 @@ mod status;
 mod vector_tests;
 
 pub use backup::{IdentityBackupShare, backup_identity, restore_identity};
+pub use ceremony::{
+    CeremonyMember, CeremonyStatus, RejectedDocument, capsule_ceremony_status,
+    group_ceremony_status,
+};
 pub use challenge::{
     ChallengeAward, ChallengeClaim, ChallengeProposalOptions, create_challenge_award,
     create_challenge_capsule_proposal, create_challenge_claim, open_challenge_content,
