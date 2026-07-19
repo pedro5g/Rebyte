@@ -1194,6 +1194,7 @@ dependencies = [
  "rebyte-semantic",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "zeroize",
 ]

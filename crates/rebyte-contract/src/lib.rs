@@ -21,6 +21,10 @@ const VERSION: u16 = 1;
 const TOKEN_PREFIX: &str = "rc1_";
 const MAX_PRINCIPALS: usize = 64;
 const MAX_CONTRACT_BYTES: usize = 16 * 1_024;
+const MIN_CHALLENGE_MEMORY_KIB: u32 = 8 * 1_024;
+const MAX_CHALLENGE_MEMORY_KIB: u32 = 1_024 * 1_024;
+const MAX_CHALLENGE_ITERATIONS: u32 = 16;
+const MAX_CHALLENGE_HINT_BYTES: usize = 1_024;
 const MAX_TOKEN_BYTES: usize = 22 * 1_024;
 const CONTRACT_ID_CONTEXT: &str = "Rebyte access contract id v1 2026-07-18";
 
@@ -297,6 +301,94 @@ impl QuorumRelease {
     }
 }
 
+/// Computational-challenge release parameters.
+///
+/// The content key is additionally wrapped under a memory-hard derivation of
+/// a creator-chosen secret solution. Listed recipients keep ordinary direct
+/// slots as the audited opening path. A challenge is a cost gate, not access
+/// control: anyone holding the envelope may search for the solution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeRelease {
+    kdf_memory_kib: u32,
+    kdf_iterations: u32,
+    solution_commitment: [u8; 32],
+    challenge_salt: [u8; 16],
+    hint: String,
+}
+
+impl ChallengeRelease {
+    /// Creates a canonical challenge release policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] for per-guess costs outside
+    /// 8 `MiB`–1 `GiB` / 1–16 passes or an oversized or non-printable hint.
+    pub fn new(
+        kdf_memory_kib: u32,
+        kdf_iterations: u32,
+        solution_commitment: [u8; 32],
+        challenge_salt: [u8; 16],
+        hint: String,
+    ) -> Result<Self, ContractError> {
+        let policy = Self {
+            kdf_memory_kib,
+            kdf_iterations,
+            solution_commitment,
+            challenge_salt,
+            hint,
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    /// Returns the Argon2id memory cost of one solution guess in `KiB`.
+    #[must_use]
+    pub const fn kdf_memory_kib(&self) -> u32 {
+        self.kdf_memory_kib
+    }
+
+    /// Returns the Argon2id pass count of one solution guess.
+    #[must_use]
+    pub const fn kdf_iterations(&self) -> u32 {
+        self.kdf_iterations
+    }
+
+    /// Returns the commitment to the derived solution key.
+    #[must_use]
+    pub const fn solution_commitment(&self) -> &[u8; 32] {
+        &self.solution_commitment
+    }
+
+    /// Returns the per-capsule derivation salt.
+    #[must_use]
+    pub const fn challenge_salt(&self) -> &[u8; 16] {
+        &self.challenge_salt
+    }
+
+    /// Returns the creator-supplied pointer to the parameter space.
+    #[must_use]
+    pub fn hint(&self) -> &str {
+        &self.hint
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        if !(MIN_CHALLENGE_MEMORY_KIB..=MAX_CHALLENGE_MEMORY_KIB).contains(&self.kdf_memory_kib)
+            || !(1..=MAX_CHALLENGE_ITERATIONS).contains(&self.kdf_iterations)
+        {
+            return Err(ContractError::UnsupportedValue);
+        }
+        if self.hint.len() > MAX_CHALLENGE_HINT_BYTES
+            || self
+                .hint
+                .chars()
+                .any(|character| character.is_control() || character == '\u{7f}')
+        {
+            return Err(ContractError::LimitExceeded);
+        }
+        Ok(())
+    }
+}
+
 /// Cryptographic mechanism controlling release of the content key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -305,6 +397,8 @@ pub enum ReleasePolicy {
     DirectRecipients,
     /// A threshold of witnesses must release independently held key shares.
     Quorum(QuorumRelease),
+    /// The content key is also released by solving a computational challenge.
+    Challenge(ChallengeRelease),
 }
 
 /// Builder for an immutable access contract.
@@ -447,6 +541,26 @@ impl AccessContract {
                     maximum_successful_releases,
                 })
             }
+            3 => {
+                let kdf_memory_kib = reader.u32()?;
+                let kdf_iterations = reader.u32()?;
+                let solution_commitment = reader.array()?;
+                let challenge_salt = reader.array()?;
+                let hint_length = usize::from(reader.u16()?);
+                if hint_length > MAX_CHALLENGE_HINT_BYTES {
+                    return Err(ContractError::LimitExceeded);
+                }
+                let hint = core::str::from_utf8(reader.take(hint_length)?)
+                    .map_err(|_| ContractError::InvalidEncoding)?
+                    .to_string();
+                ReleasePolicy::Challenge(ChallengeRelease {
+                    kdf_memory_kib,
+                    kdf_iterations,
+                    solution_commitment,
+                    challenge_salt,
+                    hint,
+                })
+            }
             _ => return Err(ContractError::UnsupportedValue),
         };
         let contract_id = ContractId(reader.array()?);
@@ -517,16 +631,7 @@ impl AccessContract {
         output.push(self.content.kind.wire());
         output.extend_from_slice(&self.content.digest);
         put_u64(&mut output, self.content.size);
-        match &self.release {
-            ReleasePolicy::DirectRecipients => output.push(1),
-            ReleasePolicy::Quorum(policy) => {
-                output.push(2);
-                put_principals(&mut output, &policy.witnesses)?;
-                put_u16(&mut output, policy.threshold);
-                put_optional_u64(&mut output, policy.not_before_unix_ms);
-                put_optional_u32(&mut output, policy.maximum_successful_releases);
-            }
-        }
+        put_release(&mut output, &self.release)?;
         output.extend_from_slice(self.contract_id.as_bytes());
         if output.len() > MAX_CONTRACT_BYTES {
             return Err(ContractError::LimitExceeded);
@@ -643,8 +748,10 @@ impl AccessContract {
             }
             _ => {}
         }
-        if let ReleasePolicy::Quorum(policy) = &self.release {
-            policy.validate()?;
+        match &self.release {
+            ReleasePolicy::Quorum(policy) => policy.validate()?,
+            ReleasePolicy::Challenge(policy) => policy.validate()?,
+            ReleasePolicy::DirectRecipients => {}
         }
         Ok(())
     }
@@ -758,19 +865,36 @@ fn calculate_contract_id(contract: &AccessContract) -> Result<[u8; 32], Contract
     bytes.push(contract.content.kind.wire());
     bytes.extend_from_slice(&contract.content.digest);
     put_u64(&mut bytes, contract.content.size);
-    match &contract.release {
-        ReleasePolicy::DirectRecipients => bytes.push(1),
-        ReleasePolicy::Quorum(policy) => {
-            bytes.push(2);
-            put_principals(&mut bytes, &policy.witnesses)?;
-            put_u16(&mut bytes, policy.threshold);
-            put_optional_u64(&mut bytes, policy.not_before_unix_ms);
-            put_optional_u32(&mut bytes, policy.maximum_successful_releases);
-        }
-    }
+    put_release(&mut bytes, &contract.release)?;
     let mut hasher = blake3::Hasher::new_derive_key(CONTRACT_ID_CONTEXT);
     hasher.update(&bytes);
     Ok(*hasher.finalize().as_bytes())
+}
+
+fn put_release(output: &mut Vec<u8>, release: &ReleasePolicy) -> Result<(), ContractError> {
+    match release {
+        ReleasePolicy::DirectRecipients => output.push(1),
+        ReleasePolicy::Quorum(policy) => {
+            output.push(2);
+            put_principals(output, &policy.witnesses)?;
+            put_u16(output, policy.threshold);
+            put_optional_u64(output, policy.not_before_unix_ms);
+            put_optional_u32(output, policy.maximum_successful_releases);
+        }
+        ReleasePolicy::Challenge(policy) => {
+            output.push(3);
+            put_u32(output, policy.kdf_memory_kib);
+            put_u32(output, policy.kdf_iterations);
+            output.extend_from_slice(&policy.solution_commitment);
+            output.extend_from_slice(&policy.challenge_salt);
+            put_u16(
+                output,
+                u16::try_from(policy.hint.len()).map_err(|_| ContractError::LengthOverflow)?,
+            );
+            output.extend_from_slice(policy.hint.as_bytes());
+        }
+    }
+    Ok(())
 }
 
 fn put_principals(output: &mut Vec<u8>, principals: &[PrincipalId]) -> Result<(), ContractError> {
@@ -833,6 +957,10 @@ fn read_optional_u32(reader: &mut Reader<'_>) -> Result<Option<u32>, ContractErr
 }
 
 fn put_u16(output: &mut Vec<u8>, value: u16) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn put_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_be_bytes());
 }
 

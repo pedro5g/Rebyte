@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod backup;
+mod challenge;
 mod codec;
 mod envelope;
 mod error;
@@ -24,6 +25,12 @@ mod status;
 mod vector_tests;
 
 pub use backup::{IdentityBackupShare, backup_identity, restore_identity};
+pub use challenge::{
+    ChallengeAward, ChallengeClaim, ChallengeProposalOptions, create_challenge_award,
+    create_challenge_capsule_proposal, create_challenge_claim, open_challenge_content,
+    verify_challenge_award, verify_challenge_claim,
+};
+pub use envelope::create_challenge_content_proposal_with_contract;
 pub use status::{
     IdentityStatus, IdentityStatusDocument, deny_statused_identities, issue_identity_status,
 };
@@ -45,8 +52,9 @@ pub use identity::{
     generate_identity,
 };
 pub use rebyte_contract::{
-    AccessContract, AccessContractBuilder, Capabilities, Capability, ContentCommitment,
-    ContentKind, ContractError, ContractId, PrincipalId, QuorumRelease, ReleasePolicy,
+    AccessContract, AccessContractBuilder, Capabilities, Capability, ChallengeRelease,
+    ContentCommitment, ContentKind, ContractError, ContractId, PrincipalId, QuorumRelease,
+    ReleasePolicy,
 };
 pub use release::{
     MemoryReleaseLedger, ReleaseAuthorization, ReleaseGrant, ReleaseLedger, ReleaseRequest,

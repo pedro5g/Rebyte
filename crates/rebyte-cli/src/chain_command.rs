@@ -12,15 +12,17 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::{Args, Subcommand, ValueEnum};
 use rebyte_chain::{
     Capability, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError, ChainLimits,
-    ContentKind as ContractContentKind, EncryptedIdentityDocument, GroupAcceptance,
-    GroupCertificate, GroupProposal, IdentityBackupShare, IdentityId, IdentityPublicDocument,
-    IdentityStatus, IdentityStatusDocument, OpenedContent, QuorumProposalOptions, ReleaseGrant,
-    ReleasePolicy, ReleaseRequest, TrustedClock, UnlockedIdentity, accept_group, approve_capsule,
-    backup_identity, create_capsule_proposal, create_quorum_capsule_proposal,
-    create_quorum_semantic_patch_proposal, create_release_request, create_semantic_patch_proposal,
-    deny_statused_identities, finalize_capsule, finalize_group, generate_identity, grant_release,
-    issue_identity_status, open_capsule, open_quorum_content, open_semantic_patch,
-    restore_identity,
+    ChallengeClaim, ChallengeProposalOptions, ContentKind as ContractContentKind,
+    EncryptedIdentityDocument, GroupAcceptance, GroupCertificate, GroupProposal,
+    IdentityBackupShare, IdentityId, IdentityPublicDocument, IdentityStatus,
+    IdentityStatusDocument, OpenedContent, QuorumProposalOptions, ReleaseGrant, ReleasePolicy,
+    ReleaseRequest, TrustedClock, UnlockedIdentity, accept_group, approve_capsule, backup_identity,
+    create_capsule_proposal, create_challenge_award, create_challenge_capsule_proposal,
+    create_challenge_claim, create_quorum_capsule_proposal, create_quorum_semantic_patch_proposal,
+    create_release_request, create_semantic_patch_proposal, deny_statused_identities,
+    finalize_capsule, finalize_group, generate_identity, grant_release, issue_identity_status,
+    open_capsule, open_challenge_content, open_quorum_content, open_semantic_patch,
+    restore_identity, verify_challenge_claim,
 };
 use rebyte_core::{
     ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
@@ -41,6 +43,7 @@ const MAX_IDENTITY_DOCUMENT_BYTES: u64 = 128 * 1_024;
 const MAX_GROUP_DOCUMENT_BYTES: u64 = 2 * 1_024 * 1_024;
 const MAX_APPROVAL_DOCUMENT_BYTES: u64 = 128 * 1_024;
 const MAX_RELEASE_DOCUMENT_BYTES: u64 = 256 * 1_024;
+const MAX_SOLUTION_FILE_BYTES: u64 = 4_098;
 
 #[derive(Debug, Args)]
 pub(super) struct ChainCommand {
@@ -58,6 +61,79 @@ enum ChainSubcommand {
     Capsule(CapsuleCommand),
     /// Request, witness and consume threshold-protected releases.
     Release(ReleaseCommand),
+    /// Solve, claim and award open computational challenges.
+    Challenge(ChallengeCommand),
+}
+
+#[derive(Debug, Args)]
+struct ChallengeCommand {
+    #[command(subcommand)]
+    command: ChallengeSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ChallengeSubcommand {
+    /// Open a challenge capsule with the exact secret solution.
+    Solve(ChallengeSolveCommand),
+    /// Prove knowledge of the solution without revealing it.
+    Claim(ChallengeClaimCommand),
+    /// Verify a claim with the solution and countersign it as winner.
+    Award(ChallengeAwardCommand),
+}
+
+#[derive(Debug, Args)]
+struct ChallengeSolveCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    /// Exact secret solution bytes; one trailing newline is ignored.
+    #[arg(long, value_name = "PATH")]
+    solution_file: PathBuf,
+    /// Reconstructed file or directory output.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Write the decrypted canonical `.rba` instead of reconstructing it.
+    #[arg(long)]
+    raw_artifact: bool,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ChallengeClaimCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// Exact secret solution bytes; one trailing newline is ignored.
+    #[arg(long, value_name = "PATH")]
+    solution_file: PathBuf,
+    /// New signed claim document.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ChallengeAwardCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    #[command(flatten)]
+    identity: PrivateIdentityArgs,
+    /// Solver claim document to verify and countersign.
+    #[arg(long, value_name = "PATH")]
+    claim: PathBuf,
+    /// Exact secret solution bytes; one trailing newline is ignored.
+    #[arg(long, value_name = "PATH")]
+    solution_file: PathBuf,
+    /// New signed award document.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -325,6 +401,37 @@ struct CapsuleCreateCommand {
     /// Signed status document; listed identities reject the whole capsule.
     #[arg(long = "status-document", value_name = "PATH")]
     status_documents: Vec<PathBuf>,
+    /// Secret solution file; enables an open computational challenge.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["witnesses", "patch"]
+    )]
+    challenge_solution_file: Option<PathBuf>,
+    /// Argon2id memory cost of one solution guess in `KiB`.
+    #[arg(
+        long,
+        value_name = "KIB",
+        default_value = "65536",
+        requires = "challenge_solution_file"
+    )]
+    challenge_memory_kib: u32,
+    /// Argon2id passes of one solution guess.
+    #[arg(
+        long,
+        value_name = "COUNT",
+        default_value = "3",
+        requires = "challenge_solution_file"
+    )]
+    challenge_iterations: u32,
+    /// Public pointer to the parameter space; insight prunes the search.
+    #[arg(
+        long,
+        value_name = "TEXT",
+        default_value = "",
+        requires = "challenge_solution_file"
+    )]
+    challenge_hint: String,
     /// New encrypted proposal awaiting group approvals.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
@@ -570,6 +677,165 @@ pub(super) fn run(command: &ChainCommand) -> Result<(), CliError> {
         ChainSubcommand::Group(command) => run_group(command),
         ChainSubcommand::Capsule(command) => run_capsule(command),
         ChainSubcommand::Release(command) => run_release(command),
+        ChainSubcommand::Challenge(command) => run_challenge(command),
+    }
+}
+
+fn run_challenge(command: &ChallengeCommand) -> Result<(), CliError> {
+    match &command.command {
+        ChallengeSubcommand::Solve(command) => solve_challenge_command(command),
+        ChallengeSubcommand::Claim(command) => claim_challenge_command(command),
+        ChallengeSubcommand::Award(command) => award_challenge_command(command),
+    }
+}
+
+fn solve_challenge_command(command: &ChallengeSolveCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    if !command.raw_artifact
+        && !envelope
+            .proposal()
+            .contract()
+            .capabilities()
+            .contains(Capability::Reconstruct)
+    {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "access contract does not grant reconstruction",
+        ));
+    }
+    let solution = read_solution_file(&command.solution_file)?;
+    let opened = open_challenge_content(&envelope, &solution, &limits).map_err(challenge_error)?;
+    let OpenedContent::ExactArtifact(opened) = opened else {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "challenge capsules protect exact artifacts only",
+        ));
+    };
+    let report = write_opened_artifact(&opened, &command.output, command.raw_artifact, &limits)?;
+    emit_open_report(
+        &report,
+        command.json,
+        "✓ Challenge solved and capsule opened",
+    )
+}
+
+fn claim_challenge_command(command: &ChallengeClaimCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    let solver = unlock_identity(&command.identity)?;
+    let solution = read_solution_file(&command.solution_file)?;
+    let claim =
+        create_challenge_claim(&envelope, &solver, &solution, &limits).map_err(challenge_error)?;
+    write_new(
+        &command.output,
+        &claim.to_json().map_err(chain_error)?,
+        false,
+    )
+    .map_err(|error| output_error("challenge claim", &command.output, &error))?;
+    let report = ChallengeClaimReport {
+        schema_version: 1,
+        claim_id: encode(&claim.claim_id().map_err(chain_error)?),
+        solver: solver.public_identity().display_name().to_string(),
+        solver_id: solver.identity_id().to_base64(),
+        output: command.output.display().to_string(),
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::success("✓ Challenge claim created"));
+        println!("  Claim ID  {}", report.claim_id);
+        println!("  Solver    {}", report.solver);
+        println!("  Output    {}", report.output);
+        println!(
+            "\nThe claim proves solution knowledge without revealing it.\nSend it to a capsule creator for the winning countersignature."
+        );
+        Ok(())
+    }
+}
+
+fn award_challenge_command(command: &ChallengeAwardCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    let judge = unlock_identity(&command.identity)?;
+    let claim_bytes = read_bounded_nofollow(&command.claim, MAX_RELEASE_DOCUMENT_BYTES)
+        .map_err(|error| input_error("challenge claim", &command.claim, &error))?;
+    let claim = ChallengeClaim::from_json(&claim_bytes).map_err(chain_error)?;
+    let solution = read_solution_file(&command.solution_file)?;
+    verify_challenge_claim(&envelope, &claim, &solution, &limits).map_err(challenge_error)?;
+    let award = create_challenge_award(&envelope, &claim, &judge, &limits).map_err(chain_error)?;
+    write_new(
+        &command.output,
+        &award.to_json().map_err(chain_error)?,
+        false,
+    )
+    .map_err(|error| output_error("challenge award", &command.output, &error))?;
+    let report = ChallengeAwardReport {
+        schema_version: 1,
+        claim_id: encode(&claim.claim_id().map_err(chain_error)?),
+        solver: claim.solver().display_name().to_string(),
+        judge: judge.public_identity().display_name().to_string(),
+        output: command.output.display().to_string(),
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::success("✓ Challenge claim countersigned"));
+        println!("  Claim ID  {}", report.claim_id);
+        println!("  Solver    {}", report.solver);
+        println!("  Judge     {}", report.judge);
+        println!("  Output    {}", report.output);
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChallengeClaimReport {
+    schema_version: u16,
+    claim_id: String,
+    solver: String,
+    solver_id: String,
+    output: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChallengeAwardReport {
+    schema_version: u16,
+    claim_id: String,
+    solver: String,
+    judge: String,
+    output: String,
+}
+
+fn read_solution_file(path: &Path) -> Result<Vec<u8>, CliError> {
+    let mut bytes =
+        read_private_bounded_nofollow(path, MAX_SOLUTION_FILE_BYTES).map_err(|error| {
+            CliError::new(
+                EXIT_POLICY,
+                format!(
+                    "cannot safely read challenge solution {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+    if bytes.ends_with(b"\r\n") {
+        bytes.truncate(bytes.len().saturating_sub(2));
+    } else if bytes.ends_with(b"\n") {
+        bytes.truncate(bytes.len().saturating_sub(1));
+    }
+    Ok(bytes)
+}
+
+fn challenge_error(error: ChainError) -> CliError {
+    if matches!(error, ChainError::AuthenticationFailed) {
+        CliError::new(EXIT_POLICY, "challenge solution is not correct")
+    } else {
+        chain_error(error)
     }
 }
 
@@ -1009,6 +1275,7 @@ fn inspect_group(command: &GroupInspectCommand) -> Result<(), CliError> {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One dispatcher covers direct, quorum and challenge modes.
 fn create_capsule(command: &CapsuleCreateCommand) -> Result<(), CliError> {
     ensure_output_absent(&command.output)?;
     let limits = ChainLimits::STANDARD;
@@ -1061,7 +1328,15 @@ fn create_capsule(command: &CapsuleCreateCommand) -> Result<(), CliError> {
         participant_ids.push(identity.identity_id().map_err(chain_error)?);
     }
     enforce_status_documents(&status_documents, &participant_ids, "capsule participant")?;
-    let proposal = if witnesses.is_empty() {
+    let proposal = if let Some(solution_path) = &command.challenge_solution_file {
+        let solution = read_solution_file(solution_path)?;
+        let options = ChallengeProposalOptions::new(
+            command.challenge_memory_kib,
+            command.challenge_iterations,
+            command.challenge_hint.clone(),
+        );
+        create_challenge_capsule_proposal(group, &content, recipients, &solution, &options, &limits)
+    } else if witnesses.is_empty() {
         if semantic_patch {
             create_semantic_patch_proposal(group, &content, recipients, &limits)
         } else {
@@ -2143,6 +2418,8 @@ struct CapsuleReport {
     release_threshold: Option<u16>,
     not_before_unix_ms: Option<u64>,
     maximum_releases: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    challenge_hint: Option<String>,
     required_approvals: u16,
     approvals: usize,
     finalized: bool,
@@ -2157,9 +2434,15 @@ impl CapsuleReport {
         envelope_bytes: usize,
     ) -> Result<Self, CliError> {
         let holders = proposal.key_holders();
+        let mut challenge_hint = None;
         let (recipients, witnesses, release_threshold, not_before_unix_ms, maximum_releases) =
             match proposal.contract().release() {
                 ReleasePolicy::DirectRecipients => {
+                    let recipients = identity_reports(holders)?;
+                    (recipients, Vec::new(), None, None, None)
+                }
+                ReleasePolicy::Challenge(policy) => {
+                    challenge_hint = Some(policy.hint().to_string());
                     let recipients = identity_reports(holders)?;
                     (recipients, Vec::new(), None, None, None)
                 }
@@ -2203,6 +2486,7 @@ impl CapsuleReport {
             release_policy: match proposal.contract().release() {
                 ReleasePolicy::DirectRecipients => "directRecipients",
                 ReleasePolicy::Quorum(_) => "quorum",
+                ReleasePolicy::Challenge(_) => "challenge",
                 _ => "unknown",
             },
             recipient_count: recipients.len(),
@@ -2212,6 +2496,7 @@ impl CapsuleReport {
             release_threshold,
             not_before_unix_ms,
             maximum_releases,
+            challenge_hint,
             required_approvals: proposal.group().capsule_threshold(),
             approvals,
             finalized,
