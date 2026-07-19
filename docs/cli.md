@@ -269,6 +269,25 @@ under a new passphrase; the public package and `IdentityId` are unchanged.
 After a restore that followed share exposure, create a fresh backup and retire
 the old shares.
 
+### `chain identity status`
+
+```text
+rebyte chain identity status
+  --private-key IDENTITY.rbk [--passphrase-file PATH]
+  --status retired|revoked --output STATUS.json [--json]
+```
+
+Issues an owner-signed statement that this identity must no longer be admitted
+to new groups, recipient lists or witness sets. `retired` communicates planned
+removal; `revoked` communicates compromise. Chain has no trusted time, so both
+reject the identity for every new operation while historical envelopes remain
+openable. `chain identity inspect` recognizes status documents.
+
+Distribution is offline and best-effort: give the document to every
+coordinator and pass it as `--status-document` on `chain group create` and
+`chain capsule create`, which then reject any denied member, group member,
+recipient or witness.
+
 ### `chain group create`
 
 ```text
@@ -327,6 +346,9 @@ it additionally verifies every unanimous formation acceptance.
 rebyte chain capsule create --group GROUP.json --artifact ARTIFACT.rba
   --recipient ALICE.public.json
   [--recipient BOB.public.json ...]
+  [--challenge-solution-file SOLUTION
+   [--challenge-memory-kib 65536] [--challenge-iterations 3]
+   [--challenge-hint TEXT]]
   --output CAPSULE.proposal.rbep [--json]
 
 rebyte chain capsule create --group GROUP.json --patch PATCH.json
@@ -539,6 +561,53 @@ replacement. A finite release allowance limits new witness-authorized
 requests; it cannot prevent replay of grants or plaintext already retained by
 the authorized recipient.
 
+### `chain challenge solve`
+
+```text
+rebyte chain challenge solve --file CAPSULE.rbe
+  --solution-file SOLUTION --output PATH [--raw-artifact] [--json]
+```
+
+Opens a challenge capsule with the exact secret solution bytes; one trailing
+newline in the solution file is ignored. Every attempt costs the full
+Argon2id derivation declared by the contract, so brute force pays the
+memory-hard price per guess. A wrong solution fails closed without revealing
+whether it was close. Challenge capsules are created with
+`chain capsule create --challenge-solution-file`; listed recipients keep the
+ordinary `chain capsule open` audit path.
+
+A challenge is a cost gate, not access control: anyone holding the envelope
+may search, and difficulty adapts to understanding of the published hint,
+never to the number of solvers. Never protect real confidential data with a
+challenge.
+
+### `chain challenge claim`
+
+```text
+rebyte chain challenge claim --file CAPSULE.rbe
+  --private-key SOLVER.rbk [--passphrase-file PATH]
+  --solution-file SOLUTION --output CLAIM.json [--json]
+```
+
+Proves this identity knows the exact solution without revealing it. The claim
+binds the envelope, contract and a fresh nonce; only a party that also knows
+the solution can verify the embedded proof.
+
+### `chain challenge award`
+
+```text
+rebyte chain challenge award --file CAPSULE.rbe
+  --private-key CREATOR.rbk [--passphrase-file PATH]
+  --claim CLAIM.json --solution-file SOLUTION
+  --output AWARD.json [--json]
+```
+
+Verifies the claim proof with the solution, requires the judging identity to
+be a listed capsule recipient, and countersigns the claim as the official
+winner. Exclusivity is human-arbitrated: a published solution opens the
+capsule for everyone, so the countersigned claim — not possession of the
+content — is the portable winner certificate.
+
 ## Consumer commands
 
 ### `inspect`
@@ -559,6 +628,11 @@ memory.
 ```console
 rebyte verify --file release.rbc --trusted-key publisher.public.json --json
 ```
+
+`--explain` reports every verification stage in its enforced order, marking
+each passed stage and the exact stage where a failing capsule was rejected.
+JSON output adds a `steps` array on success; failures keep the documented
+stderr error and exit code.
 
 ### `diff`
 

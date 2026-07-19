@@ -90,6 +90,23 @@ The capsule threshold authorizes envelope creation. Direct release is not a
 threshold secret-sharing scheme and does not require members to approve every
 future open. Every explicitly listed recipient can decrypt independently.
 
+Challenge release wraps the same CEK twice: HPKE slots for listed recipients
+(the audited path) and one XChaCha20-Poly1305 wrap under an Argon2id
+derivation of a creator-chosen secret solution, bound to the proposal core as
+associated data. The solution commitment is derived from the Argon2id output,
+so every brute-force guess pays the full memory-hard cost. A challenge is a
+cost gate, not access control: anyone holding the envelope may search, the
+race cannot be revoked after publication, and challenge capsules must never
+protect real confidential data. Claim documents prove solution knowledge via
+a keyed digest that only another solution holder can verify; creator awards
+countersign one claim as the human-arbitrated winner.
+
+Identity status documents are owner-signed statements that retire or revoke a
+Chain identity for new operations. `chain group create` and
+`chain capsule create` reject denied members, recipients and witnesses when
+the documents are supplied; distribution is offline and best-effort, and
+historical envelopes remain openable because Chain has no trusted time.
+
 For quorum release, the CEK is split into `N` Shamir shares over GF(256) with
 threshold `T`; each witness receives one share under a distinct HPKE context.
 The recipient signs a fresh envelope-bound request. A witness validates that
@@ -188,6 +205,17 @@ run can inspect, roll back or resume the persisted transaction.
 Private keys and passphrase files are opened with `nofollow`. Regular-file
 type, size and private Unix permission checks are performed on the same opened
 handle that is read, avoiding a separate path-based permission-check window.
+
+## Process hardening
+
+The CLI hardens its own process best-effort at startup: the core-dump limit
+is set to zero on Unix, and the Linux process is additionally marked
+non-dumpable, which also blocks `ptrace` attachment by other unprivileged
+processes. This keeps decrypted seeds and passphrases out of crash files and
+casual debugger reach. It is not protection against root, a debugger started
+before the process, cold-boot attacks or a compromised operating system, and
+failures are ignored so restricted sandboxes can still run read-only
+commands.
 
 ## Resource limits
 

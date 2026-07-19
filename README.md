@@ -400,6 +400,7 @@ use terminal-aware color; redirected output and `NO_COLOR` remain plain.
 | `chain group` | Create, accept, finalize or inspect a consensus group |
 | `chain capsule` | Encrypt, approve, finalize, inspect or open a group capsule |
 | `chain release` | Request and satisfy threshold/time-gated content release |
+| `chain challenge` | Solve, claim and award open computational challenges |
 | `inspect` | Parse bounded metadata; unverified data is labelled as such |
 | `verify` | Verify encoding, publisher, signature, payload and every file |
 | `diff` | Compare a verified capsule with a root without writing |

@@ -72,6 +72,8 @@ stateDiagram-v2
     Lost --> Restored: chain identity restore (any T shares)
     Restored --> BackedUp: issue fresh shares
     Restored --> InUse: same IdentityId, new passphrase
+    InUse --> Denied: chain identity status (retired / revoked)
+    Denied --> Denied: rejected by group and capsule creation
 ```
 
 The proquint fingerprint (sixteen pronounceable words shown by `generate` and
@@ -162,29 +164,30 @@ unsigned local instructions — carry them inside Chain when authorship and
 authorization matter. Reference:
 [Semantic Patch v1](../schemas/semantic-patch-v1.md).
 
-## Draft flows — not implemented
-
-The following diagrams describe design drafts only
-([Challenge v1](../schemas/challenge-v1.md),
-[Key Sequence v1](../schemas/key-sequence-v1.md)). No release implements them.
-
-### Challenge capsule (draft)
+## Challenge capsule
 
 ```mermaid
 flowchart LR
-    CR[creators choose secret parameters] --> EN[wrap CEK under KDF of solution<br/>+ commitment + hints]
+    CR[creators choose a secret solution] --> EN[capsule create --challenge-solution-file<br/>CEK wrapped under Argon2id of solution]
     EN --> PUB[publish token · open race]
     PUB --> SV{solver insight}
-    SV -->|understood the hints| SMALL[small search space]
-    SV -->|brute force| LARGE[large search space]
-    SMALL --> OPEN[solution → CEK → prize]
+    SV -->|understood the hint| SMALL[small search space]
+    SV -->|brute force| LARGE[large search space<br/>full Argon2id cost per guess]
+    SMALL --> OPEN[chain challenge solve<br/>solution → CEK → prize]
     LARGE --> OPEN
-    CR -.->|audited path| AUD[creators open via own slots<br/>or quorum]
-    OPEN --> CL[signed claim +<br/>creator countersignature]
+    CR -.->|audited path| AUD[creators open via<br/>chain capsule open]
+    OPEN --> CL[chain challenge claim →<br/>creator award countersignature]
 ```
 
-A challenge is a cost gate, not access control: never place real intellectual
-property behind one.
+A challenge is a cost gate, not access control: anyone holding the envelope
+may search, the race is irrevocable after publication, and real confidential
+data must never sit behind one. Reference:
+[Challenge v1](../schemas/challenge-v1.md).
+
+## Draft flows — not implemented
+
+The following diagram describes a design draft only
+([Key Sequence v1](../schemas/key-sequence-v1.md)). No release implements it.
 
 ### Key sequence (draft)
 

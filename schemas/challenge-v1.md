@@ -2,9 +2,12 @@
 
 Copyright (c) 2026 Pedro Martins (pedro5g)
 
-Status: design draft. No release implements this document yet. Field names,
-domains and limits are not frozen; frozen behavior will be recorded here and
-covered by canonical vectors before any implementing release.
+Status: core implemented (`rebyte-contract` release tag 3, `rebyte-chain`
+challenge module, `rebyte chain challenge` CLI). Sharded sub-puzzles remain a
+draft extension. The implemented v1 encodes the solution as an exact secret
+byte string chosen by the creators; the "parameter vector" is expressed
+through that string's documented construction and the public hint rather than
+a machine-readable schema.
 
 ## Concept
 
@@ -25,37 +28,50 @@ are solving, and this specification makes no such claim.
 
 ## Release policy
 
-`ReleasePolicy::Challenge` extends Access Contract v1 with:
+`ReleasePolicy::Challenge` (wire tag 3) extends Access Contract v1 with:
 
 ```text
 Challenge {
-    workFunction        argon2id-v1 (memory-hard guess cost) — fixed for v1
-    kdfMemoryKib        per-guess Argon2id memory cost
-    kdfIterations       per-guess Argon2id passes
-    parameterSchema     canonical description of the parameter vector fields
-    solutionCommitment  BLAKE3 derive-key commitment to the canonical solution
-    challengeSalt       random 32-byte salt; prevents cross-capsule precomputation
-    wrappedKey          XChaCha20-Poly1305(CEK) under KDF(solution)
+    kdfMemoryKib        u32   per-guess Argon2id memory cost, 8 MiB..=1 GiB
+    kdfIterations       u32   per-guess Argon2id passes, 1..=16
+    solutionCommitment  32B   BLAKE3 derive-key commitment to the derived key
+    challengeSalt       16B   random per-capsule Argon2id salt
+    hint                utf8  <=1024 bytes, no control characters
 }
 ```
 
-- The **canonical solution encoding** is the strict binary serialization of
-  the parameter vector under `parameterSchema`. Two solvers with the same
-  insight must produce identical bytes; ambiguity is a creator error.
-- Each guess costs one Argon2id evaluation. The memory-hard work function
-  narrows the advantage of GPUs and custom hardware over ordinary computers.
-- `solutionCommitment` gives solvers a cheap local success check before the
-  AEAD unwrap. A wrong solution fails both the commitment and the AEAD.
-- The challenge slot binds to the proposal core digest exactly like HPKE
-  slots, so hints, contract and ciphertext cannot be recombined.
+The envelope proposal additionally carries one challenge slot after the
+payload ciphertext, present exactly when the contract release is Challenge
+and committed by the `ProposalId`:
 
-## Sharded challenges
+```text
+ChallengeSlot {
+    nonce       24B   fresh random XChaCha20-Poly1305 nonce
+    wrappedKey  48B   XChaCha20-Poly1305(CEK) under the derived solution key
+}
+```
 
-To reduce luck variance and support teams, a challenge MAY split the CEK into
-`N` Shamir shares over GF(256) with threshold `T`, each share wrapped under an
-independent sub-solution. A team divides sub-puzzles among its members and
-pools recovered shares; a lone solver grinds them sequentially. Progress is
-observable ("11 of 20 shares solved") without weakening the unsolved shares.
+- The solution is an exact secret byte string (1..=4096 bytes; the CLI
+  ignores one trailing newline). Two solvers with the same insight must
+  produce identical bytes; ambiguity is a creator error.
+- `derivedKey = Argon2id(solution, challengeSalt, kdfMemoryKib,
+  kdfIterations, 1 lane)`. Each guess costs one full evaluation; the
+  memory-hard work function narrows GPU and custom-hardware advantage.
+- `solutionCommitment = BLAKE3-derive("Rebyte Chain challenge commitment v1
+  2026-07-18", derivedKey)`. Deriving the commitment from the Argon2id
+  output — never from the raw solution — keeps every brute-force check at
+  full cost while giving honest solvers a constant-time success check.
+- The challenge wrap uses associated data bound to the proposal core digest,
+  so hints, contract and ciphertext cannot be recombined.
+
+## Sharded challenges — draft extension
+
+To reduce luck variance and support teams, a future version MAY split the CEK
+into `N` Shamir shares over GF(256) with threshold `T`, each share wrapped
+under an independent sub-solution. A team divides sub-puzzles among its
+members and pools recovered shares; a lone solver grinds them sequentially.
+Progress is observable ("11 of 20 shares solved") without weakening the
+unsolved shares. This section is not implemented.
 
 ## Winner protocol
 
@@ -63,9 +79,11 @@ Solving is self-evident — the solver holds the plaintext — but exclusivity i
 not enforceable offline: a published solution opens the capsule for everyone.
 When one official winner matters, the human creators arbitrate:
 
-1. the solver produces a signed claim document binding the envelope ID, its
-   identity and the solution commitment (never the raw solution);
-2. creators countersign the first valid claim they accept;
+1. the solver produces a signed claim binding the envelope, contract, a
+   fresh nonce and a proof digest keyed by the derived solution key — never
+   the raw solution; only another solution holder can verify the proof;
+2. a creator verifies the proof with the solution and countersigns the first
+   claim it accepts, producing a signed award naming that solver;
 3. the countersigned claim is the portable winner certificate.
 
 ## Creator-audited release
