@@ -1145,8 +1145,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ApplyError, ApplyOptions, apply_transaction, apply_verified_tree, list_transactions,
-        rollback_transaction,
+        ApplyError, ApplyOptions, TransactionState, apply_transaction, apply_verified_tree,
+        list_transactions, resume_transaction, rollback_transaction,
     };
 
     struct TestSigner(SigningKey);
@@ -1188,6 +1188,179 @@ mod tests {
         };
         verify_capsule(CapsuleInput::Binary(capsule.as_bytes()), &policy, &keyring)
             .map_err(Into::into)
+    }
+
+    fn rewind_journal(journal_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        let mut journal: serde_json::Value = serde_json::from_slice(&fs::read(journal_path)?)?;
+        journal["state"] = serde_json::json!("staged");
+        journal["committed"] = serde_json::json!(0);
+        fs::write(journal_path, serde_json::to_vec(&journal)?)?;
+        Ok(())
+    }
+
+    #[test]
+    fn retained_transactions_list_resume_and_roll_back() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("existing.txt"), b"before\n")?;
+        let capsule = verified_fixture()?;
+        let options = ApplyOptions {
+            retain_backup: true,
+        };
+        let report = apply_transaction(&capsule, directory.path(), &options)?;
+        assert_eq!(fs::read(directory.path().join("existing.txt"))?, b"after\n");
+
+        let summaries = list_transactions(directory.path())?;
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].state, TransactionState::Committed);
+        assert!(summaries[0].retained);
+
+        assert!(matches!(
+            resume_transaction(directory.path(), &report.transaction_id),
+            Err(ApplyError::TransactionFinished)
+        ));
+
+        let journal_path = directory
+            .path()
+            .join(".rebyte/transactions")
+            .join(&report.transaction_id)
+            .join("journal.json");
+        rewind_journal(&journal_path)?;
+        fs::write(directory.path().join("existing.txt"), b"before\n")?;
+        fs::remove_file(directory.path().join("nested/created.bin"))?;
+        let resumed = resume_transaction(directory.path(), &report.transaction_id)?;
+        assert_eq!(resumed.files_written, 2);
+        assert_eq!(fs::read(directory.path().join("existing.txt"))?, b"after\n");
+
+        rollback_transaction(directory.path(), &report.transaction_id)?;
+        assert_eq!(
+            fs::read(directory.path().join("existing.txt"))?,
+            b"before\n"
+        );
+        assert!(list_transactions(directory.path())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn resume_with_a_changed_target_conflicts() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("existing.txt"), b"before\n")?;
+        let capsule = verified_fixture()?;
+        let options = ApplyOptions {
+            retain_backup: true,
+        };
+        let report = apply_transaction(&capsule, directory.path(), &options)?;
+        let journal_path = directory
+            .path()
+            .join(".rebyte/transactions")
+            .join(&report.transaction_id)
+            .join("journal.json");
+        rewind_journal(&journal_path)?;
+        fs::write(
+            directory.path().join("existing.txt"),
+            b"someone edited this\n",
+        )?;
+        assert!(matches!(
+            resume_transaction(directory.path(), &report.transaction_id),
+            Err(ApplyError::Conflict)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn an_incomplete_transaction_blocks_new_applications() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("existing.txt"), b"before\n")?;
+        let capsule = verified_fixture()?;
+        let options = ApplyOptions {
+            retain_backup: true,
+        };
+        let report = apply_transaction(&capsule, directory.path(), &options)?;
+        let journal_path = directory
+            .path()
+            .join(".rebyte/transactions")
+            .join(&report.transaction_id)
+            .join("journal.json");
+        rewind_journal(&journal_path)?;
+        assert!(matches!(
+            apply_transaction(&capsule, directory.path(), &ApplyOptions::default()),
+            Err(ApplyError::IncompleteTransaction)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_corrupted_journal_is_rejected_not_trusted() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("existing.txt"), b"before\n")?;
+        let capsule = verified_fixture()?;
+        let options = ApplyOptions {
+            retain_backup: true,
+        };
+        let report = apply_transaction(&capsule, directory.path(), &options)?;
+        let journal_path = directory
+            .path()
+            .join(".rebyte/transactions")
+            .join(&report.transaction_id)
+            .join("journal.json");
+        fs::write(&journal_path, b"{ not json")?;
+        assert!(matches!(
+            list_transactions(directory.path()),
+            Err(ApplyError::InvalidJournal)
+        ));
+        assert!(matches!(
+            resume_transaction(directory.path(), &report.transaction_id),
+            Err(ApplyError::InvalidJournal)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_and_missing_transaction_ids_are_rejected() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempdir()?;
+        assert!(list_transactions(directory.path())?.is_empty());
+        assert!(matches!(
+            resume_transaction(directory.path(), "not-a-uuid"),
+            Err(ApplyError::InvalidTransactionId)
+        ));
+        assert!(matches!(
+            rollback_transaction(directory.path(), "not-a-uuid"),
+            Err(ApplyError::InvalidTransactionId)
+        ));
+        assert!(matches!(
+            resume_transaction(directory.path(), "0193b6a0-0000-7000-8000-000000000000"),
+            Err(ApplyError::TransactionNotFound)
+        ));
+        assert!(matches!(
+            rollback_transaction(directory.path(), "0193b6a0-0000-7000-8000-000000000000"),
+            Err(ApplyError::TransactionNotFound)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn every_transaction_error_renders_a_distinct_message() {
+        let errors = [
+            ApplyError::Root(std::io::ErrorKind::NotFound),
+            ApplyError::Io(std::io::ErrorKind::PermissionDenied),
+            ApplyError::IncompleteTransaction,
+            ApplyError::TransactionNotFound,
+            ApplyError::TransactionFinished,
+            ApplyError::InvalidTransactionId,
+            ApplyError::InvalidJournal,
+            ApplyError::Symlink,
+            ApplyError::NotRegularFile,
+            ApplyError::Conflict,
+            ApplyError::Integrity,
+            ApplyError::RollbackFailed,
+            ApplyError::LengthOverflow,
+        ];
+        let mut messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert!(messages.iter().all(|message| !message.is_empty()));
+        messages.sort();
+        messages.dedup();
+        assert_eq!(messages.len(), 13);
     }
 
     #[test]

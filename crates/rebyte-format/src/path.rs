@@ -211,7 +211,67 @@ fn is_windows_device_name(component: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString as _;
+    use alloc::vec::Vec;
+
     use super::{PathError, RelativeArtifactPath};
+
+    #[test]
+    fn conversions_expose_the_same_canonical_text() -> Result<(), PathError> {
+        let path = RelativeArtifactPath::new("docs/guide.md")?;
+        assert_eq!(path.as_str(), "docs/guide.md");
+        assert_eq!(AsRef::<str>::as_ref(&path), "docs/guide.md");
+        assert_eq!(path.to_string(), "docs/guide.md");
+        assert_eq!(RelativeArtifactPath::try_from("docs/guide.md")?, path);
+        assert_eq!(path.into_string(), "docs/guide.md");
+        Ok(())
+    }
+
+    #[test]
+    fn every_rejection_reason_renders_a_distinct_message() -> Result<(), &'static str> {
+        let rejected = [
+            RelativeArtifactPath::new(""),
+            RelativeArtifactPath::new(&"a".repeat(5_000)),
+            RelativeArtifactPath::new("/abs"),
+            RelativeArtifactPath::new("a\\b"),
+            RelativeArtifactPath::new("a:b"),
+            RelativeArtifactPath::new("a\u{1}b"),
+            RelativeArtifactPath::new("a//b"),
+            RelativeArtifactPath::new("a/./b"),
+            RelativeArtifactPath::new("a/../b"),
+            RelativeArtifactPath::new("~/b"),
+            RelativeArtifactPath::new(".rebyte/state"),
+            RelativeArtifactPath::new("a./b"),
+            RelativeArtifactPath::new("COM1"),
+        ];
+        let mut messages = Vec::new();
+        for result in rejected {
+            let Err(error) = result else {
+                return Err("path must be rejected");
+            };
+            let message = error.to_string();
+            assert!(!message.is_empty());
+            messages.push(message);
+        }
+        messages.sort();
+        messages.dedup();
+        assert_eq!(messages.len(), 13, "every reason needs its own message");
+        Ok(())
+    }
+
+    #[test]
+    fn windows_device_names_are_rejected_in_any_case() {
+        for name in ["conin$", "CONOUT$", "lpt9", "com1.txt", "AUX", "nul"] {
+            assert_eq!(
+                RelativeArtifactPath::new(name),
+                Err(PathError::WindowsDeviceName),
+                "{name}"
+            );
+        }
+        assert!(RelativeArtifactPath::new("com0").is_ok());
+        assert!(RelativeArtifactPath::new("competitive").is_ok());
+        assert!(RelativeArtifactPath::new("lptx").is_ok());
+    }
 
     #[test]
     fn accepts_portable_unicode_path() {

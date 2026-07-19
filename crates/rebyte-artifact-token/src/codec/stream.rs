@@ -1279,6 +1279,136 @@ mod tests {
     use rebyte_format::{RelativeArtifactPath, SecurityLimits};
 
     #[test]
+    fn conflicting_outputs_and_symlinks_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let source = directory.path().join("plain.txt");
+        fs::write(&source, b"streaming source\n")?;
+        let taken = directory.path().join("taken.rba");
+        fs::write(&taken, b"already here")?;
+        let metadata = ArtifactPathMetadata::new();
+        assert!(matches!(
+            encode_artifact_path(&source, &taken, &metadata, &ArtifactOptions::default()),
+            Err(super::ArtifactIoError::OutputExists)
+        ));
+
+        let encoded = directory.path().join("plain.rba");
+        encode_artifact_path(&source, &encoded, &metadata, &ArtifactOptions::default())?;
+        assert!(matches!(
+            decode_artifact_file(&encoded, Some(&source), &SecurityLimits::SIMPLE_ARTIFACT),
+            Err(super::ArtifactIoError::OutputExists)
+        ));
+
+        #[cfg(unix)]
+        {
+            let tree = directory.path().join("tree");
+            fs::create_dir_all(&tree)?;
+            fs::write(tree.join("real.txt"), b"real\n")?;
+            std::os::unix::fs::symlink(tree.join("real.txt"), tree.join("link.txt"))?;
+            let output = directory.path().join("tree.rba");
+            assert!(matches!(
+                encode_artifact_path(&tree, &output, &metadata, &ArtifactOptions::default()),
+                Err(super::ArtifactIoError::SymbolicLink)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn expected_envelope_digest_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let source = directory.path().join("pinned.txt");
+        fs::write(&source, b"digest pinned bytes\n")?;
+        let encoded = directory.path().join("pinned.rba");
+        let report = encode_artifact_path(
+            &source,
+            &encoded,
+            &ArtifactPathMetadata::new(),
+            &ArtifactOptions::default(),
+        )?;
+        let restored = directory.path().join("pinned.out");
+        let decoded = super::decode_artifact_file_expected(
+            &encoded,
+            &restored,
+            &SecurityLimits::SIMPLE_ARTIFACT,
+            &report.envelope_digest(),
+        )?;
+        assert_eq!(decoded.compression(), report.compression());
+        assert_eq!(decoded.profile(), report.profile());
+        assert_eq!(decoded.entry_count(), report.entry_count());
+
+        let wrong = rebyte_format::Digest32([0x5A; 32]);
+        let elsewhere = directory.path().join("pinned.other");
+        assert!(
+            super::decode_artifact_file_expected(
+                &encoded,
+                &elsewhere,
+                &SecurityLimits::SIMPLE_ARTIFACT,
+                &wrong,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn similar_small_files_can_train_a_dictionary() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let source = directory.path().join("configs");
+        fs::create_dir_all(&source)?;
+        for index in 0..24 {
+            let body = format!(
+                "[service]\nname = \"service-{index}\"\nport = 80{index:02}\nregion = \"sao-paulo\"\nretries = 3\ntimeout_ms = 2500\n"
+            )
+            .repeat(6);
+            fs::write(source.join(format!("service-{index}.toml")), body)?;
+        }
+        let encoded = directory.path().join("configs.rba");
+        let report = encode_artifact_path(
+            &source,
+            &encoded,
+            &ArtifactPathMetadata::new(),
+            &ArtifactOptions::default(),
+        )?;
+        let restored = directory.path().join("configs.out");
+        decode_artifact_file(&encoded, Some(&restored), &SecurityLimits::SIMPLE_ARTIFACT)?;
+        for index in 0..24 {
+            assert_eq!(
+                fs::read(source.join(format!("service-{index}.toml")))?,
+                fs::read(restored.join(format!("service-{index}.toml")))?
+            );
+        }
+        assert_eq!(report.kind(), ArtifactKind::Directory);
+        Ok(())
+    }
+
+    #[test]
+    fn every_streaming_error_renders_a_message() {
+        use std::error::Error as _;
+
+        let errors = [
+            super::ArtifactIoError::Format(ArtifactTokenError::InvalidFileShape),
+            super::ArtifactIoError::Io(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            super::ArtifactIoError::SourceChanged,
+            super::ArtifactIoError::SymbolicLink,
+            super::ArtifactIoError::UnsupportedFileType,
+            super::ArtifactIoError::NonPortablePath,
+            super::ArtifactIoError::OutputExists,
+        ];
+        let mut messages = Vec::new();
+        for error in &errors {
+            let message = error.to_string();
+            assert!(!message.is_empty());
+            messages.push(message);
+        }
+        messages.sort();
+        messages.dedup();
+        assert_eq!(messages.len(), 7);
+        assert!(errors[0].source().is_some());
+        assert!(errors[1].source().is_some());
+        assert!(errors[2].source().is_none());
+    }
+
+    #[test]
     fn large_file_streams_to_binary_and_back() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempdir()?;
         let source = directory.path().join("large.txt");

@@ -479,16 +479,20 @@ impl<E> std::error::Error for SignCapsuleError<E> where E: std::error::Error + S
 #[cfg(test)]
 mod tests {
     use core::convert::Infallible;
-    use std::fmt;
 
     use ed25519_dalek::SigningKey;
     use rebyte_format::CompressionAlgorithm;
-    use rebyte_pack::{ArtifactFile, PackError, PackOptions, pack};
+    use rebyte_pack::{ArtifactFile, PackOptions, pack};
     use rebyte_signature::{
         KeyStatus, Signer, TrustChannel, TrustedKeyring, TrustedPublicKey, VerificationPolicy,
     };
 
-    use super::{CapsuleInput, SignCapsuleError, VerificationError, sign_capsule, verify_capsule};
+    use rebyte_format::SecurityLimits;
+
+    use super::{
+        CapsuleInput, PayloadVerifiedCapsule, SignCapsuleError, UnverifiedCapsule,
+        VerificationError, sign_capsule, verify_capsule, verify_capsule_with_limits,
+    };
 
     const TEST_SECRET: [u8; 32] = [0x24; 32];
 
@@ -506,7 +510,9 @@ mod tests {
         }
     }
 
-    fn fixture() -> Result<(Vec<u8>, TrustedKeyring), FixtureError> {
+    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    fn fixture() -> TestResult<(Vec<u8>, TrustedKeyring)> {
         let signer = TestSigner(SigningKey::from_bytes(&TEST_SECRET));
         let trusted = TrustedPublicKey::new(
             "test-only",
@@ -536,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_sign_verify_reconstructs_exact_files() -> Result<(), FixtureError> {
+    fn pack_sign_verify_reconstructs_exact_files() -> TestResult<()> {
         let (bytes, keyring) = fixture()?;
         let verified = verify_capsule(
             CapsuleInput::Binary(&bytes),
@@ -550,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn token_input_has_same_result() -> Result<(), FixtureError> {
+    fn token_input_has_same_result() -> TestResult<()> {
         let (bytes, keyring) = fixture()?;
         let token = rebyte_codec::encode_token(&bytes);
         let binary = verify_capsule(
@@ -564,7 +570,99 @@ mod tests {
     }
 
     #[test]
-    fn modified_signature_is_rejected() -> Result<(), FixtureError> {
+    fn staged_verification_exposes_authenticated_views() -> TestResult<()> {
+        let (bytes, keyring) = fixture()?;
+        let limits = SecurityLimits::V1;
+        let structural = UnverifiedCapsule::from_input(CapsuleInput::Binary(&bytes), &limits)?
+            .decode(&limits)?;
+        assert_eq!(structural.manifest().files.len(), 2);
+        assert!(structural.header().header_size > 0);
+        let claimed = structural.claimed_capsule_digest();
+        let verified = structural
+            .verify_signature(&development_policy(), &keyring)?
+            .verify_payload(&limits)
+            .map(PayloadVerifiedCapsule::finish)?;
+        assert_eq!(verified.capsule_digest(), claimed);
+        assert_eq!(verified.manifest().files.len(), 2);
+        assert!(verified.header().header_size > 0);
+        assert_eq!(verified.publisher().display_name.as_str(), "test-only");
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_inputs_are_rejected_before_parsing() -> TestResult<()> {
+        let (bytes, keyring) = fixture()?;
+        let mut limits = SecurityLimits::V1;
+        limits.max_capsule_bytes = 8;
+        assert!(matches!(
+            verify_capsule_with_limits(
+                CapsuleInput::Binary(&bytes),
+                &limits,
+                &development_policy(),
+                &keyring,
+            ),
+            Err(VerificationError::InputTooLarge { max: 8, .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn tampered_payload_bytes_fail_the_digest_stage() -> TestResult<()> {
+        let (bytes, keyring) = fixture()?;
+        let mut digest_mismatch = false;
+        for offset in [bytes.len() / 2, bytes.len() / 3, bytes.len() * 2 / 3] {
+            let mut mutated = bytes.clone();
+            mutated[offset] ^= 0x01;
+            match verify_capsule(
+                CapsuleInput::Binary(&mutated),
+                &development_policy(),
+                &keyring,
+            ) {
+                Ok(_) => return Err("tampered capsule must never verify".into()),
+                Err(VerificationError::CapsuleDigestMismatch) => digest_mismatch = true,
+                Err(_) => {}
+            }
+        }
+        assert!(digest_mismatch, "no offset hit the digest stage");
+        Ok(())
+    }
+
+    #[test]
+    fn every_error_variant_renders_a_distinct_message() -> TestResult<()> {
+        let Err(codec) = rebyte_codec::decode_capsule(b"junk", &SecurityLimits::V1) else {
+            return Err("junk must not decode".into());
+        };
+        let Err(compression) = rebyte_compression::decompress(
+            b"junk",
+            rebyte_format::CompressionAlgorithm::Zstd,
+            4,
+            &SecurityLimits::V1,
+        ) else {
+            return Err("junk must not decompress".into());
+        };
+        let errors = [
+            VerificationError::InputTooLarge { max: 1, actual: 2 },
+            VerificationError::from(codec),
+            VerificationError::CapsuleDigestMismatch,
+            VerificationError::from(rebyte_signature::SignatureError::UnknownKey),
+            VerificationError::from(compression),
+            VerificationError::PayloadRangeMismatch,
+            VerificationError::InvalidTextContent,
+            VerificationError::FileDigestMismatch,
+            VerificationError::LengthOverflow,
+        ];
+        let mut messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert!(messages.iter().all(|message| !message.is_empty()));
+        messages.sort();
+        messages.dedup();
+        assert_eq!(messages.len(), 9);
+        let sign: SignCapsuleError<Infallible> = SignCapsuleError::LengthOverflow;
+        assert!(!sign.to_string().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn modified_signature_is_rejected() -> TestResult<()> {
         let (mut bytes, keyring) = fixture()?;
         if let Some(last) = bytes.last_mut() {
             *last ^= 1;
@@ -578,50 +676,5 @@ mod tests {
             Err(VerificationError::Signature(_))
         ));
         Ok(())
-    }
-
-    #[derive(Debug)]
-    enum FixtureError {
-        Pack(PackError),
-        Signature(rebyte_signature::SignatureError),
-        Sign(SignCapsuleError<Infallible>),
-        Verify(VerificationError),
-    }
-
-    impl fmt::Display for FixtureError {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                Self::Pack(error) => error.fmt(formatter),
-                Self::Signature(error) => error.fmt(formatter),
-                Self::Sign(error) => error.fmt(formatter),
-                Self::Verify(error) => error.fmt(formatter),
-            }
-        }
-    }
-
-    impl std::error::Error for FixtureError {}
-
-    impl From<PackError> for FixtureError {
-        fn from(value: PackError) -> Self {
-            Self::Pack(value)
-        }
-    }
-
-    impl From<rebyte_signature::SignatureError> for FixtureError {
-        fn from(value: rebyte_signature::SignatureError) -> Self {
-            Self::Signature(value)
-        }
-    }
-
-    impl From<SignCapsuleError<Infallible>> for FixtureError {
-        fn from(value: SignCapsuleError<Infallible>) -> Self {
-            Self::Sign(value)
-        }
-    }
-
-    impl From<VerificationError> for FixtureError {
-        fn from(value: VerificationError) -> Self {
-            Self::Verify(value)
-        }
     }
 }
