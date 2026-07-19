@@ -1190,6 +1190,8 @@ mod tests {
             .map_err(Into::into)
     }
 
+    type Corruption = dyn Fn(&mut serde_json::Value);
+
     fn rewind_journal(journal_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         let mut journal: serde_json::Value = serde_json::from_slice(&fs::read(journal_path)?)?;
         journal["state"] = serde_json::json!("staged");
@@ -1336,6 +1338,43 @@ mod tests {
             rollback_transaction(directory.path(), "0193b6a0-0000-7000-8000-000000000000"),
             Err(ApplyError::TransactionNotFound)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn semantically_inconsistent_journals_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("existing.txt"), b"before\n")?;
+        let capsule = verified_fixture()?;
+        let options = ApplyOptions {
+            retain_backup: true,
+        };
+        let report = apply_transaction(&capsule, directory.path(), &options)?;
+        let journal_path = directory
+            .path()
+            .join(".rebyte/transactions")
+            .join(&report.transaction_id)
+            .join("journal.json");
+        let pristine = fs::read(&journal_path)?;
+
+        let corruptions: [&Corruption; 5] = [
+            &|journal| journal["schemaVersion"] = serde_json::json!(9),
+            &|journal| journal["id"] = serde_json::json!("not-a-uuid"),
+            &|journal| journal["committed"] = serde_json::json!(99),
+            &|journal| journal["operations"][0]["target"] = serde_json::json!("../escape"),
+            &|journal| journal["operations"][0]["staged"] = serde_json::json!("staged/oops.bin"),
+        ];
+        for corrupt in corruptions {
+            let mut journal: serde_json::Value = serde_json::from_slice(&pristine)?;
+            corrupt(&mut journal);
+            fs::write(&journal_path, serde_json::to_vec(&journal)?)?;
+            assert!(matches!(
+                list_transactions(directory.path()),
+                Err(ApplyError::InvalidJournal)
+            ));
+        }
+        fs::write(&journal_path, &pristine)?;
+        assert_eq!(list_transactions(directory.path())?.len(), 1);
         Ok(())
     }
 
