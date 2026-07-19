@@ -25,6 +25,9 @@ const MIN_CHALLENGE_MEMORY_KIB: u32 = 8 * 1_024;
 const MAX_CHALLENGE_MEMORY_KIB: u32 = 1_024 * 1_024;
 const MAX_CHALLENGE_ITERATIONS: u32 = 16;
 const MAX_CHALLENGE_HINT_BYTES: usize = 1_024;
+const MAX_CHALLENGE_SHARDS: usize = 32;
+const MIN_CHALLENGE_SHARDS: usize = 2;
+const MAX_SHARD_HINT_BYTES: usize = 128;
 const MAX_TOKEN_BYTES: usize = 22 * 1_024;
 const CONTRACT_ID_CONTEXT: &str = "Rebyte access contract id v1 2026-07-18";
 
@@ -389,6 +392,166 @@ impl ChallengeRelease {
     }
 }
 
+/// One sub-puzzle of a sharded challenge.
+///
+/// Each shard commits to the Argon2id derivation of its own secret
+/// sub-solution; solving it releases exactly one Shamir share of the content
+/// key. Correctness of a sub-solution is checkable in isolation, so team
+/// progress is observable without weakening unsolved shards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeShard {
+    salt: [u8; 16],
+    commitment: [u8; 32],
+    hint: String,
+}
+
+impl ChallengeShard {
+    /// Creates one canonical challenge shard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] for an oversized or non-printable hint.
+    pub fn new(salt: [u8; 16], commitment: [u8; 32], hint: String) -> Result<Self, ContractError> {
+        let shard = Self {
+            salt,
+            commitment,
+            hint,
+        };
+        shard.validate()?;
+        Ok(shard)
+    }
+
+    /// Returns the per-shard Argon2id derivation salt.
+    #[must_use]
+    pub const fn salt(&self) -> &[u8; 16] {
+        &self.salt
+    }
+
+    /// Returns the commitment to this shard's derived sub-solution key.
+    #[must_use]
+    pub const fn commitment(&self) -> &[u8; 32] {
+        &self.commitment
+    }
+
+    /// Returns the creator-supplied pointer to this shard's sub-puzzle.
+    #[must_use]
+    pub fn hint(&self) -> &str {
+        &self.hint
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        if self.hint.len() > MAX_SHARD_HINT_BYTES
+            || self
+                .hint
+                .chars()
+                .any(|character| character.is_control() || character == '\u{7f}')
+        {
+            return Err(ContractError::LimitExceeded);
+        }
+        Ok(())
+    }
+}
+
+/// Sharded computational-challenge release parameters.
+///
+/// The content key is split into one Shamir share per shard over GF(256);
+/// any `threshold` recovered shares reconstruct it. Every shard costs the
+/// same per-guess Argon2id work. Like the single-solution challenge, this is
+/// a cost gate, not access control, and listed recipients keep ordinary
+/// direct slots as the audited opening path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShardedChallengeRelease {
+    kdf_memory_kib: u32,
+    kdf_iterations: u32,
+    threshold: u16,
+    shards: Vec<ChallengeShard>,
+    hint: String,
+}
+
+impl ShardedChallengeRelease {
+    /// Creates a canonical sharded challenge release policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] for per-guess costs outside
+    /// 8 `MiB`–1 `GiB` / 1–16 passes, a shard count outside 2–32, an invalid
+    /// threshold or an oversized or non-printable hint.
+    pub fn new(
+        kdf_memory_kib: u32,
+        kdf_iterations: u32,
+        threshold: u16,
+        shards: Vec<ChallengeShard>,
+        hint: String,
+    ) -> Result<Self, ContractError> {
+        let policy = Self {
+            kdf_memory_kib,
+            kdf_iterations,
+            threshold,
+            shards,
+            hint,
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    /// Returns the Argon2id memory cost of one sub-solution guess in `KiB`.
+    #[must_use]
+    pub const fn kdf_memory_kib(&self) -> u32 {
+        self.kdf_memory_kib
+    }
+
+    /// Returns the Argon2id pass count of one sub-solution guess.
+    #[must_use]
+    pub const fn kdf_iterations(&self) -> u32 {
+        self.kdf_iterations
+    }
+
+    /// Returns how many recovered shares reconstruct the content key.
+    #[must_use]
+    pub const fn threshold(&self) -> u16 {
+        self.threshold
+    }
+
+    /// Returns every sub-puzzle shard in wire order.
+    #[must_use]
+    pub fn shards(&self) -> &[ChallengeShard] {
+        &self.shards
+    }
+
+    /// Returns the creator-supplied pointer to the overall parameter space.
+    #[must_use]
+    pub fn hint(&self) -> &str {
+        &self.hint
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        if !(MIN_CHALLENGE_MEMORY_KIB..=MAX_CHALLENGE_MEMORY_KIB).contains(&self.kdf_memory_kib)
+            || !(1..=MAX_CHALLENGE_ITERATIONS).contains(&self.kdf_iterations)
+        {
+            return Err(ContractError::UnsupportedValue);
+        }
+        if !(MIN_CHALLENGE_SHARDS..=MAX_CHALLENGE_SHARDS).contains(&self.shards.len()) {
+            return Err(ContractError::LimitExceeded);
+        }
+        let count = u16::try_from(self.shards.len()).map_err(|_| ContractError::LengthOverflow)?;
+        if self.threshold == 0 || self.threshold > count {
+            return Err(ContractError::InvalidThreshold);
+        }
+        for shard in &self.shards {
+            shard.validate()?;
+        }
+        if self.hint.len() > MAX_CHALLENGE_HINT_BYTES
+            || self
+                .hint
+                .chars()
+                .any(|character| character.is_control() || character == '\u{7f}')
+        {
+            return Err(ContractError::LimitExceeded);
+        }
+        Ok(())
+    }
+}
+
 /// Cryptographic mechanism controlling release of the content key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -399,6 +562,8 @@ pub enum ReleasePolicy {
     Quorum(QuorumRelease),
     /// The content key is also released by solving a computational challenge.
     Challenge(ChallengeRelease),
+    /// The content key is split into shares released by sub-challenges.
+    ShardedChallenge(ShardedChallengeRelease),
 }
 
 /// Builder for an immutable access contract.
@@ -527,42 +692,7 @@ impl AccessContract {
             digest: reader.array()?,
             size: reader.u64()?,
         };
-        let release = match reader.u8()? {
-            1 => ReleasePolicy::DirectRecipients,
-            2 => {
-                let witnesses = read_principals(&mut reader)?;
-                let threshold = reader.u16()?;
-                let not_before_unix_ms = read_optional_u64(&mut reader)?;
-                let maximum_successful_releases = read_optional_u32(&mut reader)?;
-                ReleasePolicy::Quorum(QuorumRelease {
-                    witnesses,
-                    threshold,
-                    not_before_unix_ms,
-                    maximum_successful_releases,
-                })
-            }
-            3 => {
-                let kdf_memory_kib = reader.u32()?;
-                let kdf_iterations = reader.u32()?;
-                let solution_commitment = reader.array()?;
-                let challenge_salt = reader.array()?;
-                let hint_length = usize::from(reader.u16()?);
-                if hint_length > MAX_CHALLENGE_HINT_BYTES {
-                    return Err(ContractError::LimitExceeded);
-                }
-                let hint = core::str::from_utf8(reader.take(hint_length)?)
-                    .map_err(|_| ContractError::InvalidEncoding)?
-                    .to_string();
-                ReleasePolicy::Challenge(ChallengeRelease {
-                    kdf_memory_kib,
-                    kdf_iterations,
-                    solution_commitment,
-                    challenge_salt,
-                    hint,
-                })
-            }
-            _ => return Err(ContractError::UnsupportedValue),
-        };
+        let release = read_release(&mut reader)?;
         let contract_id = ContractId(reader.array()?);
         reader.finish()?;
         let contract = Self {
@@ -751,6 +881,7 @@ impl AccessContract {
         match &self.release {
             ReleasePolicy::Quorum(policy) => policy.validate()?,
             ReleasePolicy::Challenge(policy) => policy.validate()?,
+            ReleasePolicy::ShardedChallenge(policy) => policy.validate()?,
             ReleasePolicy::DirectRecipients => {}
         }
         Ok(())
@@ -871,6 +1002,86 @@ fn calculate_contract_id(contract: &AccessContract) -> Result<[u8; 32], Contract
     Ok(*hasher.finalize().as_bytes())
 }
 
+fn read_release(reader: &mut Reader<'_>) -> Result<ReleasePolicy, ContractError> {
+    let release = match reader.u8()? {
+        1 => ReleasePolicy::DirectRecipients,
+        2 => {
+            let witnesses = read_principals(reader)?;
+            let threshold = reader.u16()?;
+            let not_before_unix_ms = read_optional_u64(reader)?;
+            let maximum_successful_releases = read_optional_u32(reader)?;
+            ReleasePolicy::Quorum(QuorumRelease {
+                witnesses,
+                threshold,
+                not_before_unix_ms,
+                maximum_successful_releases,
+            })
+        }
+        3 => {
+            let kdf_memory_kib = reader.u32()?;
+            let kdf_iterations = reader.u32()?;
+            let solution_commitment = reader.array()?;
+            let challenge_salt = reader.array()?;
+            let hint_length = usize::from(reader.u16()?);
+            if hint_length > MAX_CHALLENGE_HINT_BYTES {
+                return Err(ContractError::LimitExceeded);
+            }
+            let hint = core::str::from_utf8(reader.take(hint_length)?)
+                .map_err(|_| ContractError::InvalidEncoding)?
+                .to_string();
+            ReleasePolicy::Challenge(ChallengeRelease {
+                kdf_memory_kib,
+                kdf_iterations,
+                solution_commitment,
+                challenge_salt,
+                hint,
+            })
+        }
+        4 => {
+            let kdf_memory_kib = reader.u32()?;
+            let kdf_iterations = reader.u32()?;
+            let threshold = reader.u16()?;
+            let shard_count = usize::from(reader.u16()?);
+            if !(MIN_CHALLENGE_SHARDS..=MAX_CHALLENGE_SHARDS).contains(&shard_count) {
+                return Err(ContractError::LimitExceeded);
+            }
+            let mut shards = Vec::with_capacity(shard_count);
+            for _ in 0..shard_count {
+                let salt = reader.array()?;
+                let commitment = reader.array()?;
+                let hint_length = usize::from(reader.u16()?);
+                if hint_length > MAX_SHARD_HINT_BYTES {
+                    return Err(ContractError::LimitExceeded);
+                }
+                let hint = core::str::from_utf8(reader.take(hint_length)?)
+                    .map_err(|_| ContractError::InvalidEncoding)?
+                    .to_string();
+                shards.push(ChallengeShard {
+                    salt,
+                    commitment,
+                    hint,
+                });
+            }
+            let hint_length = usize::from(reader.u16()?);
+            if hint_length > MAX_CHALLENGE_HINT_BYTES {
+                return Err(ContractError::LimitExceeded);
+            }
+            let hint = core::str::from_utf8(reader.take(hint_length)?)
+                .map_err(|_| ContractError::InvalidEncoding)?
+                .to_string();
+            ReleasePolicy::ShardedChallenge(ShardedChallengeRelease {
+                kdf_memory_kib,
+                kdf_iterations,
+                threshold,
+                shards,
+                hint,
+            })
+        }
+        _ => return Err(ContractError::UnsupportedValue),
+    };
+    Ok(release)
+}
+
 fn put_release(output: &mut Vec<u8>, release: &ReleasePolicy) -> Result<(), ContractError> {
     match release {
         ReleasePolicy::DirectRecipients => output.push(1),
@@ -887,6 +1098,30 @@ fn put_release(output: &mut Vec<u8>, release: &ReleasePolicy) -> Result<(), Cont
             put_u32(output, policy.kdf_iterations);
             output.extend_from_slice(&policy.solution_commitment);
             output.extend_from_slice(&policy.challenge_salt);
+            put_u16(
+                output,
+                u16::try_from(policy.hint.len()).map_err(|_| ContractError::LengthOverflow)?,
+            );
+            output.extend_from_slice(policy.hint.as_bytes());
+        }
+        ReleasePolicy::ShardedChallenge(policy) => {
+            output.push(4);
+            put_u32(output, policy.kdf_memory_kib);
+            put_u32(output, policy.kdf_iterations);
+            put_u16(output, policy.threshold);
+            put_u16(
+                output,
+                u16::try_from(policy.shards.len()).map_err(|_| ContractError::LengthOverflow)?,
+            );
+            for shard in &policy.shards {
+                output.extend_from_slice(&shard.salt);
+                output.extend_from_slice(&shard.commitment);
+                put_u16(
+                    output,
+                    u16::try_from(shard.hint.len()).map_err(|_| ContractError::LengthOverflow)?,
+                );
+                output.extend_from_slice(shard.hint.as_bytes());
+            }
             put_u16(
                 output,
                 u16::try_from(policy.hint.len()).map_err(|_| ContractError::LengthOverflow)?,

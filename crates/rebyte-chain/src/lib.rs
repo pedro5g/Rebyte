@@ -31,11 +31,17 @@ pub use ceremony::{
     group_ceremony_status,
 };
 pub use challenge::{
-    ChallengeAward, ChallengeClaim, ChallengeProposalOptions, create_challenge_award,
-    create_challenge_capsule_proposal, create_challenge_claim, open_challenge_content,
-    verify_challenge_award, verify_challenge_claim,
+    ChallengeAward, ChallengeClaim, ChallengeProposalOptions, ChallengeShardSolution,
+    ShardedChallengeProposalOptions, create_challenge_award, create_challenge_capsule_proposal,
+    create_challenge_claim, create_sharded_challenge_capsule_proposal,
+    create_sharded_challenge_claim, open_challenge_content, open_sharded_challenge_content,
+    verify_challenge_award, verify_challenge_claim, verify_challenge_shard,
+    verify_sharded_challenge_claim,
 };
-pub use envelope::create_challenge_content_proposal_with_contract;
+pub use envelope::{
+    create_challenge_content_proposal_with_contract,
+    create_sharded_challenge_content_proposal_with_contract,
+};
 pub use status::{
     IdentityStatus, IdentityStatusDocument, deny_statused_identities, issue_identity_status,
 };
@@ -58,8 +64,8 @@ pub use identity::{
 };
 pub use rebyte_contract::{
     AccessContract, AccessContractBuilder, Capabilities, Capability, ChallengeRelease,
-    ContentCommitment, ContentKind, ContractError, ContractId, PrincipalId, QuorumRelease,
-    ReleasePolicy,
+    ChallengeShard, ContentCommitment, ContentKind, ContractError, ContractId, PrincipalId,
+    QuorumRelease, ReleasePolicy, ShardedChallengeRelease,
 };
 pub use release::{
     MemoryReleaseLedger, ReleaseAuthorization, ReleaseGrant, ReleaseLedger, ReleaseRequest,

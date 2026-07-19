@@ -29,8 +29,9 @@ use zeroize::Zeroizing;
 use crate::codec::{decode_array, domain_hash, encode_base64, put_u16};
 use crate::envelope::{
     CapsuleEnvelope, ChainLimits, OpenedContent, challenge_aad, decrypt_payload_core,
-    opened_content,
+    opened_content, recipient_cek, shard_aad,
 };
+use crate::secret_sharing::{SHARE_BYTES, combine_shares};
 use crate::{ChainError, GroupCertificate, IdentityId, IdentityPublicDocument, UnlockedIdentity};
 
 const DOCUMENT_VERSION: u16 = 1;
@@ -39,6 +40,8 @@ const AWARD_KIND: &str = "rebyte-chain-challenge-award";
 const CLAIM_SIGNATURE_DOMAIN: &[u8] = b"rebyte chain challenge claim v1\0";
 const AWARD_SIGNATURE_DOMAIN: &[u8] = b"rebyte chain challenge award v1\0";
 const COMMITMENT_CONTEXT: &str = "Rebyte Chain challenge commitment v1 2026-07-18";
+const SHARD_COMMITMENT_CONTEXT: &str = "Rebyte Chain challenge shard commitment v1 2026-07-19";
+const SHARDED_CLAIM_KEY_CONTEXT: &str = "Rebyte Chain sharded challenge claim key v1 2026-07-19";
 const CLAIM_PROOF_CONTEXT: &str = "Rebyte Chain challenge claim proof v1 2026-07-18";
 const CLAIM_ID_CONTEXT: &str = "Rebyte Chain challenge claim id v1 2026-07-18";
 const MIN_SOLUTION_BYTES: usize = 1;
@@ -107,6 +110,28 @@ pub fn create_challenge_capsule_proposal(
         options.hint.clone(),
     )
     .map_err(|_| ChainError::InvalidContract)?;
+    let contract = challenge_contract(
+        &group,
+        artifact_binary,
+        &recipients,
+        ReleasePolicy::Challenge(policy),
+    )?;
+    crate::envelope::create_challenge_content_proposal_with_contract(
+        group,
+        artifact_binary,
+        recipients,
+        contract,
+        &solution_key,
+        limits,
+    )
+}
+
+fn challenge_contract(
+    group: &GroupCertificate,
+    artifact_binary: &[u8],
+    recipients: &[IdentityPublicDocument],
+    release: ReleasePolicy,
+) -> Result<AccessContract, ChainError> {
     let group_id = group.group_id()?;
     let controllers = group
         .proposal()
@@ -118,7 +143,7 @@ pub fn create_challenge_capsule_proposal(
         .iter()
         .map(|identity| identity.identity_id().map(principal_id))
         .collect::<Result<Vec<_>, _>>()?;
-    let contract = AccessContract::builder(
+    AccessContract::builder(
         PrincipalId::from_bytes(*group_id.as_bytes()),
         ContentCommitment::new(
             ContentKind::ExactArtifact,
@@ -129,15 +154,87 @@ pub fn create_challenge_capsule_proposal(
     .controllers(controllers, group.capsule_threshold())
     .recipients(recipient_ids)
     .capabilities(Capabilities::APPLY_EXACT)
-    .release(ReleasePolicy::Challenge(policy))
+    .release(release)
     .build()
+    .map_err(|_| ChainError::InvalidContract)
+}
+
+/// Creator-selected parameters for one sharded challenge capsule.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShardedChallengeProposalOptions {
+    /// Argon2id memory cost of one sub-solution guess in `KiB`.
+    pub kdf_memory_kib: u32,
+    /// Argon2id passes of one sub-solution guess.
+    pub kdf_iterations: u32,
+    /// How many recovered shares reconstruct the content key.
+    pub threshold: u16,
+    /// Public pointer to the overall parameter space.
+    pub hint: String,
+    /// Per-shard hints; empty, or exactly one per sub-solution.
+    pub shard_hints: Vec<String>,
+}
+
+/// Encrypts one exact artifact behind a sharded computational challenge.
+///
+/// The content key splits into one Shamir share per sub-solution; any
+/// `threshold` solved shards reconstruct it. `recipients` are the audited
+/// opening path and must contain at least one identity.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] for empty or oversized sub-solutions, a hint count
+/// that is neither empty nor one per shard, invalid parameters, identities
+/// or content, or a cryptographic failure.
+pub fn create_sharded_challenge_capsule_proposal(
+    group: GroupCertificate,
+    artifact_binary: &[u8],
+    recipients: Vec<IdentityPublicDocument>,
+    solutions: &[&[u8]],
+    options: &ShardedChallengeProposalOptions,
+    limits: &ChainLimits,
+) -> Result<crate::CapsuleProposal, ChainError> {
+    group.validate()?;
+    if !options.shard_hints.is_empty() && options.shard_hints.len() != solutions.len() {
+        return Err(ChainError::InvalidContract);
+    }
+    let mut shards = Vec::with_capacity(solutions.len());
+    let mut shard_keys = Vec::with_capacity(solutions.len());
+    for (index, solution) in solutions.iter().enumerate() {
+        let mut salt = [0_u8; 16];
+        getrandom::fill(&mut salt).map_err(|_| ChainError::EntropyUnavailable)?;
+        let key = derive_key_at(
+            solution,
+            &salt,
+            options.kdf_memory_kib,
+            options.kdf_iterations,
+        )?;
+        let hint = options.shard_hints.get(index).cloned().unwrap_or_default();
+        shards.push(
+            rebyte_contract::ChallengeShard::new(salt, shard_commitment(&key), hint)
+                .map_err(|_| ChainError::InvalidContract)?,
+        );
+        shard_keys.push(key);
+    }
+    let policy = rebyte_contract::ShardedChallengeRelease::new(
+        options.kdf_memory_kib,
+        options.kdf_iterations,
+        options.threshold,
+        shards,
+        options.hint.clone(),
+    )
     .map_err(|_| ChainError::InvalidContract)?;
-    crate::envelope::create_challenge_content_proposal_with_contract(
+    let contract = challenge_contract(
+        &group,
+        artifact_binary,
+        &recipients,
+        ReleasePolicy::ShardedChallenge(policy),
+    )?;
+    crate::envelope::create_sharded_challenge_content_proposal_with_contract(
         group,
         artifact_binary,
         recipients,
         contract,
-        &solution_key,
+        &shard_keys,
         limits,
     )
 }
@@ -157,6 +254,93 @@ pub fn open_challenge_content(
     limits: &ChainLimits,
 ) -> Result<OpenedContent, ChainError> {
     let cek = release_challenge_cek(envelope, solution, limits)?;
+    let decrypted = decrypt_payload_core(
+        envelope,
+        IdentityId::from_bytes([0; 32]),
+        cek.as_ref(),
+        limits,
+    )?;
+    opened_content(decrypted)
+}
+
+/// One indexed secret sub-solution of a sharded challenge.
+pub struct ChallengeShardSolution {
+    index: u16,
+    solution: Zeroizing<Vec<u8>>,
+}
+
+impl ChallengeShardSolution {
+    /// Binds one exact sub-solution to its zero-based contract shard index.
+    #[must_use]
+    pub fn new(index: u16, solution: Vec<u8>) -> Self {
+        Self {
+            index,
+            solution: Zeroizing::new(solution),
+        }
+    }
+
+    /// Returns the zero-based contract shard index.
+    #[must_use]
+    pub const fn index(&self) -> u16 {
+        self.index
+    }
+}
+
+/// Checks one sub-solution against its shard commitment without opening.
+///
+/// This is the team-progress primitive: each verified shard is progress a
+/// team can trust and divide, and a failed check reveals nothing beyond one
+/// full-cost wrong guess.
+///
+/// # Errors
+///
+/// Returns [`ChainError::AuthenticationFailed`] for a wrong sub-solution, or
+/// another [`ChainError`] for an unknown index or non-sharded policy.
+pub fn verify_challenge_shard(
+    envelope: &CapsuleEnvelope,
+    index: u16,
+    solution: &[u8],
+    limits: &ChainLimits,
+) -> Result<(), ChainError> {
+    envelope.validate(limits)?;
+    let ReleasePolicy::ShardedChallenge(policy) = envelope.proposal().contract().release() else {
+        return Err(ChainError::UnsupportedReleasePolicy);
+    };
+    let shard = policy
+        .shards()
+        .get(usize::from(index))
+        .ok_or(ChainError::InvalidShare)?;
+    let key = derive_key_at(
+        solution,
+        shard.salt(),
+        policy.kdf_memory_kib(),
+        policy.kdf_iterations(),
+    )?;
+    if bool::from(shard_commitment(&key).ct_eq(shard.commitment())) {
+        Ok(())
+    } else {
+        Err(ChainError::AuthenticationFailed)
+    }
+}
+
+/// Opens a sharded challenge capsule with exactly the threshold of verified
+/// sub-solutions.
+///
+/// The opener is anonymous: the returned content reports the zero identity
+/// as its recipient. Listed recipients keep the ordinary `open_capsule` path.
+///
+/// # Errors
+///
+/// Returns [`ChainError::AuthenticationFailed`] for any wrong sub-solution,
+/// [`ChainError::InvalidShare`] for duplicate or unknown indices or a count
+/// different from the contract threshold, or another [`ChainError`] for an
+/// invalid envelope.
+pub fn open_sharded_challenge_content(
+    envelope: &CapsuleEnvelope,
+    solutions: &[ChallengeShardSolution],
+    limits: &ChainLimits,
+) -> Result<OpenedContent, ChainError> {
+    let cek = release_sharded_cek(envelope, solutions, limits)?;
     let decrypted = decrypt_payload_core(
         envelope,
         IdentityId::from_bytes([0; 32]),
@@ -263,10 +447,35 @@ pub fn create_challenge_claim(
     limits: &ChainLimits,
 ) -> Result<ChallengeClaim, ChainError> {
     let solution_key = verified_solution_key(envelope, solution, limits)?;
+    create_claim_with_key(envelope, solver, &solution_key)
+}
+
+/// Creates a signed claim proving this solver reconstructed the sharded
+/// content key.
+///
+/// # Errors
+///
+/// Returns [`ChainError::AuthenticationFailed`] when any sub-solution is
+/// wrong, or another [`ChainError`] for an invalid envelope.
+pub fn create_sharded_challenge_claim(
+    envelope: &CapsuleEnvelope,
+    solver: &UnlockedIdentity,
+    solutions: &[ChallengeShardSolution],
+    limits: &ChainLimits,
+) -> Result<ChallengeClaim, ChainError> {
+    let cek = release_sharded_cek(envelope, solutions, limits)?;
+    create_claim_with_key(envelope, solver, &sharded_claim_key(&cek))
+}
+
+fn create_claim_with_key(
+    envelope: &CapsuleEnvelope,
+    solver: &UnlockedIdentity,
+    proof_key: &Zeroizing<[u8; 32]>,
+) -> Result<ChallengeClaim, ChainError> {
     let mut nonce = [0_u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| ChainError::EntropyUnavailable)?;
     let solver_id = solver.identity_id();
-    let proof = claim_proof(&solution_key, envelope.envelope_id(), &solver_id, &nonce);
+    let proof = claim_proof(proof_key, envelope.envelope_id(), &solver_id, &nonce);
     let mut claim = ChallengeClaim {
         schema_version: DOCUMENT_VERSION,
         kind: CLAIM_KIND.to_string(),
@@ -298,8 +507,48 @@ pub fn verify_challenge_claim(
     solution: &[u8],
     limits: &ChainLimits,
 ) -> Result<(), ChainError> {
-    claim.validate_shape()?;
     let solution_key = verified_solution_key(envelope, solution, limits)?;
+    verify_claim_with_key(envelope, claim, &solution_key)
+}
+
+/// Verifies a sharded claim as a listed recipient, without any solution.
+///
+/// The judge recovers the content key through its own audited slot and
+/// checks the claim proof against it, so awarding a sharded challenge never
+/// requires the creators to retain the sub-solutions.
+///
+/// # Errors
+///
+/// Returns [`ChainError::AuthenticationFailed`] when the claim proof does not
+/// match, [`ChainError::NotRecipient`] for a judge without a slot, or another
+/// [`ChainError`] for broken bindings or a non-sharded policy.
+pub fn verify_sharded_challenge_claim(
+    envelope: &CapsuleEnvelope,
+    claim: &ChallengeClaim,
+    judge: &UnlockedIdentity,
+    limits: &ChainLimits,
+) -> Result<(), ChainError> {
+    if !matches!(
+        envelope.proposal().contract().release(),
+        ReleasePolicy::ShardedChallenge(_)
+    ) {
+        return Err(ChainError::UnsupportedReleasePolicy);
+    }
+    let cek_bytes = recipient_cek(envelope, judge, limits)?;
+    let mut cek = Zeroizing::new([0_u8; 32]);
+    if cek_bytes.len() != cek.len() {
+        return Err(ChainError::CryptographicFailure);
+    }
+    cek.as_mut().copy_from_slice(&cek_bytes);
+    verify_claim_with_key(envelope, claim, &sharded_claim_key(&cek))
+}
+
+fn verify_claim_with_key(
+    envelope: &CapsuleEnvelope,
+    claim: &ChallengeClaim,
+    proof_key: &Zeroizing<[u8; 32]>,
+) -> Result<(), ChainError> {
+    claim.validate_shape()?;
     if decode_array::<32>(&claim.envelope_id)? != *envelope.envelope_id()
         || decode_array::<32>(&claim.contract_id)?
             != *envelope.proposal().contract().contract_id().as_bytes()
@@ -307,7 +556,7 @@ pub fn verify_challenge_claim(
         return Err(ChainError::BindingMismatch);
     }
     let expected = claim_proof(
-        &solution_key,
+        proof_key,
         envelope.envelope_id(),
         &claim.solver.identity_id()?,
         &decode_array::<32>(&claim.claim_nonce)?,
@@ -448,6 +697,66 @@ pub fn verify_challenge_award(
     Ok(())
 }
 
+fn release_sharded_cek(
+    envelope: &CapsuleEnvelope,
+    solutions: &[ChallengeShardSolution],
+    limits: &ChainLimits,
+) -> Result<Zeroizing<[u8; 32]>, ChainError> {
+    envelope.validate(limits)?;
+    let ReleasePolicy::ShardedChallenge(policy) = envelope.proposal().contract().release() else {
+        return Err(ChainError::UnsupportedReleasePolicy);
+    };
+    if solutions.len() != usize::from(policy.threshold()) {
+        return Err(ChainError::InvalidShare);
+    }
+    let core = envelope.proposal().core_bytes()?;
+    let mut seen = [false; 64];
+    let mut shares = Vec::with_capacity(solutions.len());
+    for entry in solutions {
+        let index = usize::from(entry.index);
+        let contract_shard = policy.shards().get(index).ok_or(ChainError::InvalidShare)?;
+        let position = seen.get_mut(index).ok_or(ChainError::InvalidShare)?;
+        if *position {
+            return Err(ChainError::InvalidShare);
+        }
+        *position = true;
+        let key = derive_key_at(
+            &entry.solution,
+            contract_shard.salt(),
+            policy.kdf_memory_kib(),
+            policy.kdf_iterations(),
+        )?;
+        if !bool::from(shard_commitment(&key).ct_eq(contract_shard.commitment())) {
+            return Err(ChainError::AuthenticationFailed);
+        }
+        let slot = envelope
+            .proposal()
+            .shard_slot(index)
+            .ok_or(ChainError::InvalidShare)?;
+        let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
+            .map_err(|_| ChainError::CryptographicFailure)?;
+        let share_bytes = Zeroizing::new(
+            cipher
+                .decrypt(
+                    &XNonce::from(slot.nonce),
+                    Payload {
+                        msg: slot.wrapped_share.as_slice(),
+                        aad: &shard_aad(&core, entry.index),
+                    },
+                )
+                .map_err(|_| ChainError::AuthenticationFailed)?,
+        );
+        let mut share = Zeroizing::new([0_u8; SHARE_BYTES]);
+        if share_bytes.len() != share.len() {
+            return Err(ChainError::CryptographicFailure);
+        }
+        share.as_mut().copy_from_slice(&share_bytes);
+        shares.push(share);
+    }
+    let threshold = u8::try_from(policy.threshold()).map_err(|_| ChainError::InvalidThreshold)?;
+    combine_shares(&shares, threshold)
+}
+
 fn release_challenge_cek(
     envelope: &CapsuleEnvelope,
     solution: &[u8],
@@ -502,26 +811,43 @@ pub(crate) fn derive_solution_key(
     solution: &[u8],
     policy: &ChallengeRelease,
 ) -> Result<Zeroizing<[u8; 32]>, ChainError> {
+    derive_key_at(
+        solution,
+        policy.challenge_salt(),
+        policy.kdf_memory_kib(),
+        policy.kdf_iterations(),
+    )
+}
+
+fn derive_key_at(
+    solution: &[u8],
+    salt: &[u8; 16],
+    kdf_memory_kib: u32,
+    kdf_iterations: u32,
+) -> Result<Zeroizing<[u8; 32]>, ChainError> {
     if !(MIN_SOLUTION_BYTES..=MAX_SOLUTION_BYTES).contains(&solution.len()) {
         return Err(ChainError::InvalidContent);
     }
-    let params = Params::new(
-        policy.kdf_memory_kib(),
-        policy.kdf_iterations(),
-        KDF_LANES,
-        Some(32),
-    )
-    .map_err(|_| ChainError::KeyDerivation)?;
+    let params = Params::new(kdf_memory_kib, kdf_iterations, KDF_LANES, Some(32))
+        .map_err(|_| ChainError::KeyDerivation)?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = Zeroizing::new([0_u8; 32]);
     argon2
-        .hash_password_into(solution, policy.challenge_salt(), key.as_mut())
+        .hash_password_into(solution, salt, key.as_mut())
         .map_err(|_| ChainError::KeyDerivation)?;
     Ok(key)
 }
 
 pub(crate) fn solution_commitment(solution_key: &Zeroizing<[u8; 32]>) -> [u8; 32] {
     domain_hash(COMMITMENT_CONTEXT, &[solution_key.as_ref()])
+}
+
+fn shard_commitment(shard_key: &Zeroizing<[u8; 32]>) -> [u8; 32] {
+    domain_hash(SHARD_COMMITMENT_CONTEXT, &[shard_key.as_ref()])
+}
+
+fn sharded_claim_key(cek: &Zeroizing<[u8; 32]>) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(domain_hash(SHARDED_CLAIM_KEY_CONTEXT, &[cek.as_ref()]))
 }
 
 fn claim_proof(
@@ -665,6 +991,118 @@ mod tests {
         let mut mutated_bytes = serde_json::to_vec_pretty(&mutated)?;
         mutated_bytes.push(b'\n');
         assert!(super::ChallengeClaim::from_json(&mutated_bytes).is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One expensive fixture covers the whole sharded protocol.
+    fn threshold_of_sub_solutions_opens_while_partial_and_wrong_fail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{
+            ChallengeShardSolution, ShardedChallengeProposalOptions,
+            create_sharded_challenge_capsule_proposal, create_sharded_challenge_claim,
+            open_sharded_challenge_content, verify_challenge_shard, verify_sharded_challenge_claim,
+        };
+
+        let (creator_private, creator_public) = deterministic_identity(0x63, "Creator")?;
+        let (solver_private, _) = deterministic_identity(0x64, "Solver")?;
+        let creator = creator_private.unlock(TEST_PASSPHRASE)?;
+        let solver = solver_private.unlock(TEST_PASSPHRASE)?;
+        let group_proposal = deterministic_group("Shard owners", 1, vec![creator_public])?;
+        let group = finalize_group(
+            group_proposal.clone(),
+            vec![accept_group(&group_proposal, &creator)?],
+        )?;
+        let artifact = encode_artifact(
+            &Artifact::file(b"sharded prize bytes\n".to_vec(), false),
+            &ArtifactOptions::default(),
+        )?
+        .into_binary();
+        let limits = ChainLimits::STANDARD;
+        let solutions: [&[u8]; 3] = [b"north gate 17", b"south gate 03", b"west gate 44"];
+        let proposal = create_sharded_challenge_capsule_proposal(
+            group,
+            &artifact,
+            vec![creator.public_identity().clone()],
+            &solutions,
+            &ShardedChallengeProposalOptions {
+                kdf_memory_kib: 8 * 1_024,
+                kdf_iterations: 1,
+                threshold: 2,
+                hint: "three gates guard the prize".to_string(),
+                shard_hints: vec!["north".to_string(), "south".to_string(), "west".to_string()],
+            },
+            &limits,
+        )?;
+        let envelope = finalize_capsule(
+            proposal.clone(),
+            vec![approve_capsule(&proposal, &creator, &limits)?],
+            &limits,
+        )?;
+        let envelope = CapsuleEnvelope::from_bytes(&envelope.to_bytes(&limits)?, &limits)?;
+
+        verify_challenge_shard(&envelope, 0, solutions[0], &limits)?;
+        verify_challenge_shard(&envelope, 2, solutions[2], &limits)?;
+        assert!(matches!(
+            verify_challenge_shard(&envelope, 1, b"wrong gate", &limits),
+            Err(ChainError::AuthenticationFailed)
+        ));
+        assert!(verify_challenge_shard(&envelope, 9, solutions[0], &limits).is_err());
+
+        let two = vec![
+            ChallengeShardSolution::new(0, solutions[0].to_vec()),
+            ChallengeShardSolution::new(2, solutions[2].to_vec()),
+        ];
+        let OpenedContent::ExactArtifact(opened) =
+            open_sharded_challenge_content(&envelope, &two, &limits)?
+        else {
+            return Err("unexpected content kind".into());
+        };
+        assert_eq!(opened.artifact_binary(), artifact);
+
+        assert!(matches!(
+            open_sharded_challenge_content(
+                &envelope,
+                &[ChallengeShardSolution::new(0, solutions[0].to_vec())],
+                &limits,
+            ),
+            Err(ChainError::InvalidShare)
+        ));
+        assert!(matches!(
+            open_sharded_challenge_content(
+                &envelope,
+                &[
+                    ChallengeShardSolution::new(0, solutions[0].to_vec()),
+                    ChallengeShardSolution::new(0, solutions[0].to_vec()),
+                ],
+                &limits,
+            ),
+            Err(ChainError::InvalidShare)
+        ));
+        assert!(matches!(
+            open_sharded_challenge_content(
+                &envelope,
+                &[
+                    ChallengeShardSolution::new(0, solutions[0].to_vec()),
+                    ChallengeShardSolution::new(1, b"wrong gate".to_vec()),
+                ],
+                &limits,
+            ),
+            Err(ChainError::AuthenticationFailed)
+        ));
+
+        let audited = open_capsule(&envelope, &creator, &limits)?;
+        assert_eq!(audited.artifact_binary(), artifact);
+
+        let claim = create_sharded_challenge_claim(&envelope, &solver, &two, &limits)?;
+        let claim = super::ChallengeClaim::from_json(&claim.to_json()?)?;
+        verify_sharded_challenge_claim(&envelope, &claim, &creator, &limits)?;
+        assert!(matches!(
+            verify_sharded_challenge_claim(&envelope, &claim, &solver, &limits),
+            Err(ChainError::NotRecipient)
+        ));
+        let award = super::create_challenge_award(&envelope, &claim, &creator, &limits)?;
+        super::verify_challenge_award(&envelope, &claim, &award, &limits)?;
         Ok(())
     }
 }

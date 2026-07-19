@@ -12,18 +12,21 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::{Args, Subcommand, ValueEnum};
 use rebyte_chain::{
     Capability, CapsuleApproval, CapsuleEnvelope, CapsuleProposal, ChainError, ChainLimits,
-    ChallengeClaim, ChallengeProposalOptions, ContentKind as ContractContentKind,
-    EncryptedIdentityDocument, GroupAcceptance, GroupCertificate, GroupProposal,
-    IdentityBackupShare, IdentityId, IdentityPublicDocument, IdentityStatus,
-    IdentityStatusDocument, OpenedContent, QuorumProposalOptions, ReleaseGrant, ReleasePolicy,
-    ReleaseRequest, TrustedClock, UnlockedIdentity, accept_group, approve_capsule, backup_identity,
-    capsule_ceremony_status, create_capsule_proposal, create_challenge_award,
-    create_challenge_capsule_proposal, create_challenge_claim, create_quorum_capsule_proposal,
-    create_quorum_semantic_patch_proposal, create_release_request, create_semantic_patch_proposal,
+    ChallengeClaim, ChallengeProposalOptions, ChallengeShardSolution,
+    ContentKind as ContractContentKind, EncryptedIdentityDocument, GroupAcceptance,
+    GroupCertificate, GroupProposal, IdentityBackupShare, IdentityId, IdentityPublicDocument,
+    IdentityStatus, IdentityStatusDocument, OpenedContent, QuorumProposalOptions, ReleaseGrant,
+    ReleasePolicy, ReleaseRequest, ShardedChallengeProposalOptions, TrustedClock, UnlockedIdentity,
+    accept_group, approve_capsule, backup_identity, capsule_ceremony_status,
+    create_capsule_proposal, create_challenge_award, create_challenge_capsule_proposal,
+    create_challenge_claim, create_quorum_capsule_proposal, create_quorum_semantic_patch_proposal,
+    create_release_request, create_semantic_patch_proposal,
+    create_sharded_challenge_capsule_proposal, create_sharded_challenge_claim,
     deny_statused_identities, finalize_capsule, finalize_group, generate_identity, grant_release,
     group_ceremony_status, issue_identity_status, open_capsule, open_challenge_content,
-    open_quorum_content, open_semantic_patch, rekey_identity, restore_identity,
-    verify_challenge_claim,
+    open_quorum_content, open_semantic_patch, open_sharded_challenge_content, rekey_identity,
+    restore_identity, verify_challenge_claim, verify_challenge_shard,
+    verify_sharded_challenge_claim,
 };
 use rebyte_core::{
     ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
@@ -114,6 +117,8 @@ struct ChallengeCommand {
 enum ChallengeSubcommand {
     /// Open a challenge capsule with the exact secret solution.
     Solve(ChallengeSolveCommand),
+    /// Verify one sub-solution of a sharded challenge without opening.
+    Check(ChallengeCheckCommand),
     /// Prove knowledge of the solution without revealing it.
     Claim(ChallengeClaimCommand),
     /// Verify a claim with the solution and countersign it as winner.
@@ -125,8 +130,11 @@ struct ChallengeSolveCommand {
     #[command(flatten)]
     input: CapsuleInputArgs,
     /// Exact secret solution bytes; one trailing newline is ignored.
-    #[arg(long, value_name = "PATH")]
-    solution_file: PathBuf,
+    #[arg(long, value_name = "PATH", conflicts_with = "solution_shares")]
+    solution_file: Option<PathBuf>,
+    /// Indexed sub-solution as INDEX:PATH; repeat exactly the threshold times.
+    #[arg(long = "solution-share", value_name = "INDEX:PATH")]
+    solution_shares: Vec<String>,
     /// Reconstructed file or directory output.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
@@ -139,14 +147,32 @@ struct ChallengeSolveCommand {
 }
 
 #[derive(Debug, Args)]
+struct ChallengeCheckCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    /// Zero-based contract shard index to check.
+    #[arg(long, value_name = "INDEX")]
+    shard: u16,
+    /// Exact secret sub-solution bytes; one trailing newline is ignored.
+    #[arg(long, value_name = "PATH")]
+    solution_file: PathBuf,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct ChallengeClaimCommand {
     #[command(flatten)]
     input: CapsuleInputArgs,
     #[command(flatten)]
     identity: PrivateIdentityArgs,
     /// Exact secret solution bytes; one trailing newline is ignored.
-    #[arg(long, value_name = "PATH")]
-    solution_file: PathBuf,
+    #[arg(long, value_name = "PATH", conflicts_with = "solution_shares")]
+    solution_file: Option<PathBuf>,
+    /// Indexed sub-solution as INDEX:PATH; repeat exactly the threshold times.
+    #[arg(long = "solution-share", value_name = "INDEX:PATH")]
+    solution_shares: Vec<String>,
     /// New signed claim document.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
@@ -164,9 +190,10 @@ struct ChallengeAwardCommand {
     /// Solver claim document to verify and countersign.
     #[arg(long, value_name = "PATH")]
     claim: PathBuf,
-    /// Exact secret solution bytes; one trailing newline is ignored.
+    /// Exact secret solution bytes; sharded challenges verify with the
+    /// judge identity instead and must omit this.
     #[arg(long, value_name = "PATH")]
-    solution_file: PathBuf,
+    solution_file: Option<PathBuf>,
     /// New signed award document.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
@@ -474,13 +501,23 @@ struct CapsuleCreateCommand {
     /// Signed status document; listed identities reject the whole capsule.
     #[arg(long = "status-document", value_name = "PATH")]
     status_documents: Vec<PathBuf>,
-    /// Secret solution file; enables an open computational challenge.
+    /// Secret solution file; repeat to shard the challenge into sub-puzzles.
     #[arg(
         long,
         value_name = "PATH",
         conflicts_with_all = ["witnesses", "patch"]
     )]
-    challenge_solution_file: Option<PathBuf>,
+    challenge_solution_file: Vec<PathBuf>,
+    /// Solved shards required to open; defaults to every shard.
+    #[arg(long, value_name = "T", requires = "challenge_solution_file")]
+    challenge_threshold: Option<u16>,
+    /// Public per-shard hint in solution order; repeat none or once per shard.
+    #[arg(
+        long = "challenge-shard-hint",
+        value_name = "TEXT",
+        requires = "challenge_solution_file"
+    )]
+    challenge_shard_hints: Vec<String>,
     /// Argon2id memory cost of one solution guess in `KiB`.
     #[arg(
         long,
@@ -863,8 +900,53 @@ fn ceremony_status_command(command: &CeremonyStatusCommand) -> Result<(), CliErr
 fn run_challenge(command: &ChallengeCommand) -> Result<(), CliError> {
     match &command.command {
         ChallengeSubcommand::Solve(command) => solve_challenge_command(command),
+        ChallengeSubcommand::Check(command) => check_challenge_command(command),
         ChallengeSubcommand::Claim(command) => claim_challenge_command(command),
         ChallengeSubcommand::Award(command) => award_challenge_command(command),
+    }
+}
+
+fn read_shard_solutions(entries: &[String]) -> Result<Vec<ChallengeShardSolution>, CliError> {
+    entries
+        .iter()
+        .map(|entry| {
+            let (index, path) = entry.split_once(':').ok_or_else(|| {
+                CliError::new(EXIT_GENERIC, "use INDEX:PATH for every --solution-share")
+            })?;
+            let index: u16 = index.parse().map_err(|_| {
+                CliError::new(EXIT_GENERIC, "shard index must be a zero-based number")
+            })?;
+            Ok(ChallengeShardSolution::new(
+                index,
+                read_solution_file(Path::new(path))?,
+            ))
+        })
+        .collect()
+}
+
+fn check_challenge_command(command: &ChallengeCheckCommand) -> Result<(), CliError> {
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    let solution = read_solution_file(&command.solution_file)?;
+    verify_challenge_shard(&envelope, command.shard, &solution, &limits)
+        .map_err(challenge_error)?;
+    let report = ChallengeCheckReport {
+        schema_version: 1,
+        shard: command.shard,
+        valid: true,
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!(
+            "{}",
+            super::ui::success(&format!(
+                "✓ Shard {} sub-solution is correct",
+                command.shard
+            ))
+        );
+        println!("\nEach verified shard is durable team progress; share it as such.");
+        Ok(())
     }
 }
 
@@ -884,8 +966,16 @@ fn solve_challenge_command(command: &ChallengeSolveCommand) -> Result<(), CliErr
             "access contract does not grant reconstruction",
         ));
     }
-    let solution = read_solution_file(&command.solution_file)?;
-    let opened = open_challenge_content(&envelope, &solution, &limits).map_err(challenge_error)?;
+    let opened = if command.solution_shares.is_empty() {
+        let path = command.solution_file.as_ref().ok_or_else(|| {
+            CliError::new(EXIT_GENERIC, "provide --solution-file or --solution-share")
+        })?;
+        let solution = read_solution_file(path)?;
+        open_challenge_content(&envelope, &solution, &limits).map_err(challenge_error)?
+    } else {
+        let shares = read_shard_solutions(&command.solution_shares)?;
+        open_sharded_challenge_content(&envelope, &shares, &limits).map_err(challenge_error)?
+    };
     let OpenedContent::ExactArtifact(opened) = opened else {
         return Err(CliError::new(
             EXIT_POLICY,
@@ -905,9 +995,17 @@ fn claim_challenge_command(command: &ChallengeClaimCommand) -> Result<(), CliErr
     let limits = ChainLimits::STANDARD;
     let envelope = read_capsule_input(&command.input, &limits)?;
     let solver = unlock_identity(&command.identity)?;
-    let solution = read_solution_file(&command.solution_file)?;
-    let claim =
-        create_challenge_claim(&envelope, &solver, &solution, &limits).map_err(challenge_error)?;
+    let claim = if command.solution_shares.is_empty() {
+        let path = command.solution_file.as_ref().ok_or_else(|| {
+            CliError::new(EXIT_GENERIC, "provide --solution-file or --solution-share")
+        })?;
+        let solution = read_solution_file(path)?;
+        create_challenge_claim(&envelope, &solver, &solution, &limits).map_err(challenge_error)?
+    } else {
+        let shares = read_shard_solutions(&command.solution_shares)?;
+        create_sharded_challenge_claim(&envelope, &solver, &shares, &limits)
+            .map_err(challenge_error)?
+    };
     write_new(
         &command.output,
         &claim.to_json().map_err(chain_error)?,
@@ -943,8 +1041,25 @@ fn award_challenge_command(command: &ChallengeAwardCommand) -> Result<(), CliErr
     let claim_bytes = read_bounded_nofollow(&command.claim, MAX_RELEASE_DOCUMENT_BYTES)
         .map_err(|error| input_error("challenge claim", &command.claim, &error))?;
     let claim = ChallengeClaim::from_json(&claim_bytes).map_err(chain_error)?;
-    let solution = read_solution_file(&command.solution_file)?;
-    verify_challenge_claim(&envelope, &claim, &solution, &limits).map_err(challenge_error)?;
+    if matches!(
+        envelope.proposal().contract().release(),
+        ReleasePolicy::ShardedChallenge(_)
+    ) {
+        if command.solution_file.is_some() {
+            return Err(CliError::new(
+                EXIT_GENERIC,
+                "sharded challenges verify claims with the judge identity; omit --solution-file",
+            ));
+        }
+        verify_sharded_challenge_claim(&envelope, &claim, &judge, &limits)
+            .map_err(challenge_error)?;
+    } else {
+        let path = command.solution_file.as_ref().ok_or_else(|| {
+            CliError::new(EXIT_GENERIC, "provide --solution-file to verify this claim")
+        })?;
+        let solution = read_solution_file(path)?;
+        verify_challenge_claim(&envelope, &claim, &solution, &limits).map_err(challenge_error)?;
+    }
     let award = create_challenge_award(&envelope, &claim, &judge, &limits).map_err(chain_error)?;
     write_new(
         &command.output,
@@ -1016,6 +1131,14 @@ struct AuditIdentityReport {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ChallengeCheckReport {
+    schema_version: u16,
+    shard: u16,
+    valid: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CeremonyStatusReport {
     schema_version: u16,
     ceremony: &'static str,
@@ -1071,10 +1194,15 @@ fn read_solution_file(path: &Path) -> Result<Vec<u8>, CliError> {
 }
 
 fn challenge_error(error: ChainError) -> CliError {
-    if matches!(error, ChainError::AuthenticationFailed) {
-        CliError::new(EXIT_POLICY, "challenge solution is not correct")
-    } else {
-        chain_error(error)
+    match error {
+        ChainError::AuthenticationFailed => {
+            CliError::new(EXIT_POLICY, "challenge solution is not correct")
+        }
+        ChainError::InvalidShare => CliError::new(
+            EXIT_POLICY,
+            "provide exactly the threshold of distinct shard sub-solutions",
+        ),
+        _ => chain_error(error),
     }
 }
 
@@ -1732,14 +1860,44 @@ fn create_capsule(command: &CapsuleCreateCommand) -> Result<(), CliError> {
         participant_ids.push(identity.identity_id().map_err(chain_error)?);
     }
     enforce_status_documents(&status_documents, &participant_ids, "capsule participant")?;
-    let proposal = if let Some(solution_path) = &command.challenge_solution_file {
-        let solution = read_solution_file(solution_path)?;
+    let proposal = if command.challenge_solution_file.len() == 1 {
+        if command.challenge_threshold.is_some() || !command.challenge_shard_hints.is_empty() {
+            return Err(CliError::new(
+                EXIT_GENERIC,
+                "sharded challenge options need at least two --challenge-solution-file inputs",
+            ));
+        }
+        let solution = read_solution_file(&command.challenge_solution_file[0])?;
         let options = ChallengeProposalOptions::new(
             command.challenge_memory_kib,
             command.challenge_iterations,
             command.challenge_hint.clone(),
         );
         create_challenge_capsule_proposal(group, &content, recipients, &solution, &options, &limits)
+    } else if !command.challenge_solution_file.is_empty() {
+        let solutions = command
+            .challenge_solution_file
+            .iter()
+            .map(|path| read_solution_file(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let solution_slices: Vec<&[u8]> = solutions.iter().map(Vec::as_slice).collect();
+        let default_threshold = u16::try_from(solutions.len())
+            .map_err(|_| CliError::new(EXIT_POLICY, "too many challenge shards"))?;
+        let options = ShardedChallengeProposalOptions {
+            kdf_memory_kib: command.challenge_memory_kib,
+            kdf_iterations: command.challenge_iterations,
+            threshold: command.challenge_threshold.unwrap_or(default_threshold),
+            hint: command.challenge_hint.clone(),
+            shard_hints: command.challenge_shard_hints.clone(),
+        };
+        create_sharded_challenge_capsule_proposal(
+            group,
+            &content,
+            recipients,
+            &solution_slices,
+            &options,
+            &limits,
+        )
     } else if witnesses.is_empty() {
         if semantic_patch {
             create_semantic_patch_proposal(group, &content, recipients, &limits)
@@ -2824,6 +2982,10 @@ struct CapsuleReport {
     maximum_releases: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     challenge_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    challenge_shards: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    challenge_threshold: Option<u16>,
     required_approvals: u16,
     approvals: usize,
     finalized: bool,
@@ -2839,6 +3001,8 @@ impl CapsuleReport {
     ) -> Result<Self, CliError> {
         let holders = proposal.key_holders();
         let mut challenge_hint = None;
+        let mut challenge_shards = None;
+        let mut challenge_threshold = None;
         let (recipients, witnesses, release_threshold, not_before_unix_ms, maximum_releases) =
             match proposal.contract().release() {
                 ReleasePolicy::DirectRecipients => {
@@ -2847,6 +3011,13 @@ impl CapsuleReport {
                 }
                 ReleasePolicy::Challenge(policy) => {
                     challenge_hint = Some(policy.hint().to_string());
+                    let recipients = identity_reports(holders)?;
+                    (recipients, Vec::new(), None, None, None)
+                }
+                ReleasePolicy::ShardedChallenge(policy) => {
+                    challenge_hint = Some(policy.hint().to_string());
+                    challenge_shards = Some(policy.shards().len());
+                    challenge_threshold = Some(policy.threshold());
                     let recipients = identity_reports(holders)?;
                     (recipients, Vec::new(), None, None, None)
                 }
@@ -2891,6 +3062,7 @@ impl CapsuleReport {
                 ReleasePolicy::DirectRecipients => "directRecipients",
                 ReleasePolicy::Quorum(_) => "quorum",
                 ReleasePolicy::Challenge(_) => "challenge",
+                ReleasePolicy::ShardedChallenge(_) => "shardedChallenge",
                 _ => "unknown",
             },
             recipient_count: recipients.len(),
@@ -2901,6 +3073,8 @@ impl CapsuleReport {
             not_before_unix_ms,
             maximum_releases,
             challenge_hint,
+            challenge_shards,
+            challenge_threshold,
             required_approvals: proposal.group().capsule_threshold(),
             approvals,
             finalized,
@@ -2927,6 +3101,9 @@ fn print_capsule_report(report: &CapsuleReport) {
         report.content_kind, report.content_bytes
     );
     println!("  Release       {}", report.release_policy);
+    if let (Some(shards), Some(threshold)) = (report.challenge_shards, report.challenge_threshold) {
+        println!("  Shards        any {threshold} of {shards} sub-solutions");
+    }
     println!("  Capabilities  {}", report.capabilities.join(", "));
     println!(
         "  Approvals     {} of {} required",

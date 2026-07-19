@@ -56,6 +56,9 @@ const PAYLOAD_NONCE_BYTES: usize = 24;
 pub(super) const CHALLENGE_WRAPPED_CEK_BYTES: usize = CEK_BYTES + HPKE_TAG_BYTES;
 const CHALLENGE_AAD_DOMAIN: &[u8] = b"rebyte chain challenge wrap aad v1\0";
 const CHALLENGE_AUDIT_INFO_DOMAIN: &[u8] = b"rebyte chain hpke challenge audit slot v1\0";
+pub(super) const SHARD_WRAPPED_SHARE_BYTES: usize = SHARE_BYTES + HPKE_TAG_BYTES;
+const SHARD_AAD_DOMAIN: &[u8] = b"rebyte chain challenge shard wrap aad v1\0";
+const SHARD_AUDIT_INFO_DOMAIN: &[u8] = b"rebyte chain hpke sharded challenge audit slot v1\0";
 const PAYLOAD_TAG_BYTES: usize = 16;
 
 /// Resource policy for encrypted Chain artifacts.
@@ -127,6 +130,22 @@ pub(super) struct ChallengeSlot {
     pub(super) wrapped_key: [u8; CHALLENGE_WRAPPED_CEK_BYTES],
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ChallengeShardSlot {
+    pub(super) nonce: [u8; PAYLOAD_NONCE_BYTES],
+    pub(super) wrapped_share: [u8; SHARD_WRAPPED_SHARE_BYTES],
+}
+
+/// Per-policy key material wrapped alongside the recipient slots.
+pub(super) enum ChallengeWrap<'keys> {
+    /// No additional wrap: direct or quorum release.
+    Plain,
+    /// One extra CEK wrap under the derived solution key.
+    Single(&'keys Zeroizing<[u8; CEK_BYTES]>),
+    /// One Shamir share wrap per shard, in contract shard order.
+    Sharded(&'keys [Zeroizing<[u8; CEK_BYTES]>]),
+}
+
 /// Encrypted artifact proposal awaiting the group's capsule threshold.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapsuleProposal {
@@ -139,6 +158,7 @@ pub struct CapsuleProposal {
     slots: Vec<KeySlot>,
     ciphertext: Vec<u8>,
     challenge: Option<ChallengeSlot>,
+    shard_slots: Option<Vec<ChallengeShardSlot>>,
     proposal_id: [u8; 32],
 }
 
@@ -198,6 +218,18 @@ impl CapsuleProposal {
         } else {
             None
         };
+        let shard_slots = if let ReleasePolicy::ShardedChallenge(policy) = contract.release() {
+            let mut shard_slots = Vec::with_capacity(policy.shards().len());
+            for _ in 0..policy.shards().len() {
+                shard_slots.push(ChallengeShardSlot {
+                    nonce: reader.array()?,
+                    wrapped_share: reader.array()?,
+                });
+            }
+            Some(shard_slots)
+        } else {
+            None
+        };
         let proposal_id = reader.array()?;
         reader.finish()?;
         let proposal = Self {
@@ -210,6 +242,7 @@ impl CapsuleProposal {
             slots,
             ciphertext,
             challenge,
+            shard_slots,
             proposal_id,
         };
         proposal.validate(limits)?;
@@ -261,6 +294,12 @@ impl CapsuleProposal {
             output.extend_from_slice(&challenge.nonce);
             output.extend_from_slice(&challenge.wrapped_key);
         }
+        if let Some(shard_slots) = &self.shard_slots {
+            for shard_slot in shard_slots {
+                output.extend_from_slice(&shard_slot.nonce);
+                output.extend_from_slice(&shard_slot.wrapped_share);
+            }
+        }
         output.extend_from_slice(&self.proposal_id);
         enforce_length(output.len(), limits.max_envelope_bytes)?;
         Ok(output)
@@ -299,6 +338,10 @@ impl CapsuleProposal {
     // Callers must have validated this proposal on the current data.
     pub(super) const fn challenge_slot(&self) -> Option<&ChallengeSlot> {
         self.challenge.as_ref()
+    }
+
+    pub(super) fn shard_slot(&self, index: usize) -> Option<&ChallengeShardSlot> {
+        self.shard_slots.as_ref().and_then(|slots| slots.get(index))
     }
 
     // Callers must have validated this proposal on the current data.
@@ -341,6 +384,14 @@ impl CapsuleProposal {
             != self.challenge.is_some()
         {
             return Err(ChainError::BindingMismatch);
+        }
+        match (self.contract.release(), &self.shard_slots) {
+            (ReleasePolicy::ShardedChallenge(policy), Some(shard_slots))
+                if shard_slots.len() == policy.shards().len() => {}
+            (ReleasePolicy::ShardedChallenge(_), _) | (_, Some(_)) => {
+                return Err(ChainError::BindingMismatch);
+            }
+            (_, None) => {}
         }
         let mut previous = None;
         let mut holder_ids = Vec::with_capacity(self.slots.len());
@@ -873,7 +924,14 @@ pub fn create_content_proposal_with_contract(
     if !matches!(contract.release(), ReleasePolicy::DirectRecipients) {
         return Err(ChainError::UnsupportedReleasePolicy);
     }
-    create_proposal_with_holders(group, content_binary, recipients, contract, None, limits)
+    create_proposal_with_holders(
+        group,
+        content_binary,
+        recipients,
+        contract,
+        &ChallengeWrap::Plain,
+        limits,
+    )
 }
 
 /// Encrypts canonical content using witness-held threshold key shares.
@@ -896,7 +954,14 @@ pub fn create_quorum_content_proposal_with_contract(
     if !matches!(contract.release(), ReleasePolicy::Quorum(_)) {
         return Err(ChainError::UnsupportedReleasePolicy);
     }
-    create_proposal_with_holders(group, content_binary, witnesses, contract, None, limits)
+    create_proposal_with_holders(
+        group,
+        content_binary,
+        witnesses,
+        contract,
+        &ChallengeWrap::Plain,
+        limits,
+    )
 }
 
 /// Encrypts canonical content behind a computational-challenge contract.
@@ -924,7 +989,40 @@ pub fn create_challenge_content_proposal_with_contract(
         content_binary,
         recipients,
         contract,
-        Some(solution_key),
+        &ChallengeWrap::Single(solution_key),
+        limits,
+    )
+}
+
+/// Encrypts canonical content behind a sharded-challenge contract.
+///
+/// The content key is split into one Shamir share per contract shard; share
+/// `i` is wrapped under `shard_keys[i]`, the Argon2id derivation of that
+/// shard's secret sub-solution. Listed recipients keep ordinary direct slots
+/// as the audited opening path.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] for a non-sharded contract, a key count that does
+/// not match the contract shards, invalid content or a cryptographic
+/// failure.
+pub fn create_sharded_challenge_content_proposal_with_contract(
+    group: GroupCertificate,
+    content_binary: &[u8],
+    recipients: Vec<IdentityPublicDocument>,
+    contract: AccessContract,
+    shard_keys: &[Zeroizing<[u8; 32]>],
+    limits: &ChainLimits,
+) -> Result<CapsuleProposal, ChainError> {
+    if !matches!(contract.release(), ReleasePolicy::ShardedChallenge(_)) {
+        return Err(ChainError::UnsupportedReleasePolicy);
+    }
+    create_proposal_with_holders(
+        group,
+        content_binary,
+        recipients,
+        contract,
+        &ChallengeWrap::Sharded(shard_keys),
         limits,
     )
 }
@@ -935,7 +1033,7 @@ fn create_proposal_with_holders(
     content_binary: &[u8],
     holders: Vec<IdentityPublicDocument>,
     contract: AccessContract,
-    challenge_key: Option<&Zeroizing<[u8; CEK_BYTES]>>,
+    challenge_wrap: &ChallengeWrap<'_>,
     limits: &ChainLimits,
 ) -> Result<CapsuleProposal, ChainError> {
     group.validate()?;
@@ -980,8 +1078,8 @@ fn create_proposal_with_holders(
             },
         )
         .map_err(|_| ChainError::CryptographicFailure)?;
-    let challenge = match (contract.release(), challenge_key) {
-        (ReleasePolicy::Challenge(_), Some(solution_key)) => {
+    let (challenge, shard_slots) = match (contract.release(), challenge_wrap) {
+        (ReleasePolicy::Challenge(_), ChallengeWrap::Single(solution_key)) => {
             let mut nonce = [0_u8; PAYLOAD_NONCE_BYTES];
             getrandom::fill(&mut nonce).map_err(|_| ChainError::EntropyUnavailable)?;
             let cipher = XChaCha20Poly1305::new_from_slice(solution_key.as_ref())
@@ -999,12 +1097,48 @@ fn create_proposal_with_holders(
                 .as_slice()
                 .try_into()
                 .map_err(|_| ChainError::CryptographicFailure)?;
-            Some(ChallengeSlot { nonce, wrapped_key })
+            (Some(ChallengeSlot { nonce, wrapped_key }), None)
         }
-        (ReleasePolicy::Challenge(_), None) | (_, Some(_)) => {
-            return Err(ChainError::UnsupportedReleasePolicy);
+        (ReleasePolicy::ShardedChallenge(policy), ChallengeWrap::Sharded(shard_keys)) => {
+            if shard_keys.len() != policy.shards().len() {
+                return Err(ChainError::UnsupportedReleasePolicy);
+            }
+            let share_count =
+                u8::try_from(shard_keys.len()).map_err(|_| ChainError::LengthOverflow)?;
+            let threshold =
+                u8::try_from(policy.threshold()).map_err(|_| ChainError::InvalidThreshold)?;
+            let shares = split_secret(&cek, share_count, threshold)?;
+            let mut slots = Vec::with_capacity(shares.len());
+            for (index, (share, shard_key)) in shares.iter().zip(shard_keys.iter()).enumerate() {
+                let mut nonce = [0_u8; PAYLOAD_NONCE_BYTES];
+                getrandom::fill(&mut nonce).map_err(|_| ChainError::EntropyUnavailable)?;
+                let cipher = XChaCha20Poly1305::new_from_slice(shard_key.as_ref())
+                    .map_err(|_| ChainError::CryptographicFailure)?;
+                let index = u16::try_from(index).map_err(|_| ChainError::LengthOverflow)?;
+                let wrapped = cipher
+                    .encrypt(
+                        &XNonce::from(nonce),
+                        Payload {
+                            msg: share.as_ref(),
+                            aad: &shard_aad(&core, index),
+                        },
+                    )
+                    .map_err(|_| ChainError::CryptographicFailure)?;
+                let wrapped_share: [u8; SHARD_WRAPPED_SHARE_BYTES] = wrapped
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ChainError::CryptographicFailure)?;
+                slots.push(ChallengeShardSlot {
+                    nonce,
+                    wrapped_share,
+                });
+            }
+            (None, Some(slots))
         }
-        _ => None,
+        (ReleasePolicy::DirectRecipients | ReleasePolicy::Quorum(_), ChallengeWrap::Plain) => {
+            (None, None)
+        }
+        _ => return Err(ChainError::UnsupportedReleasePolicy),
     };
     let key_material = key_material_for_holders(&cek, contract.release(), holders.len())?;
     let mut slots = Vec::with_capacity(holders.len());
@@ -1045,6 +1179,7 @@ fn create_proposal_with_holders(
         slots,
         ciphertext,
         challenge,
+        shard_slots,
         proposal_id: [0; 32],
     };
     proposal.proposal_id = calculate_proposal_id(&proposal)?;
@@ -1270,10 +1405,22 @@ fn decrypt_content(
     recipient: &UnlockedIdentity,
     limits: &ChainLimits,
 ) -> Result<DecryptedContent, ChainError> {
+    let cek = recipient_cek(envelope, recipient, limits)?;
+    decrypt_payload_with_cek(envelope, recipient.identity_id(), cek.as_slice(), limits)
+}
+
+// Callers must treat the returned key as plaintext-equivalent material.
+pub(super) fn recipient_cek(
+    envelope: &CapsuleEnvelope,
+    recipient: &UnlockedIdentity,
+    limits: &ChainLimits,
+) -> Result<Zeroizing<Vec<u8>>, ChainError> {
     envelope.validate(limits)?;
     if !matches!(
         envelope.proposal.contract.release(),
-        ReleasePolicy::DirectRecipients | ReleasePolicy::Challenge(_)
+        ReleasePolicy::DirectRecipients
+            | ReleasePolicy::Challenge(_)
+            | ReleasePolicy::ShardedChallenge(_)
     ) {
         return Err(ChainError::UnsupportedReleasePolicy);
     }
@@ -1326,7 +1473,7 @@ fn decrypt_content(
     if cek.len() != CEK_BYTES {
         return Err(ChainError::CryptographicFailure);
     }
-    decrypt_payload_with_cek(envelope, recipient_id, cek.as_slice(), limits)
+    Ok(cek)
 }
 
 pub(super) fn decrypt_payload_with_cek(
@@ -1563,6 +1710,12 @@ fn calculate_proposal_id(proposal: &CapsuleProposal) -> Result<[u8; 32], ChainEr
         slots.extend_from_slice(&challenge.nonce);
         slots.extend_from_slice(&challenge.wrapped_key);
     }
+    if let Some(shard_slots) = &proposal.shard_slots {
+        for shard_slot in shard_slots {
+            slots.extend_from_slice(&shard_slot.nonce);
+            slots.extend_from_slice(&shard_slot.wrapped_share);
+        }
+    }
     let ciphertext_digest = domain_hash(
         "Rebyte Chain ciphertext digest v2 2026-07-18",
         &[&proposal.ciphertext],
@@ -1601,7 +1754,9 @@ fn key_material_for_holders(
     holder_count: usize,
 ) -> Result<Vec<Zeroizing<Vec<u8>>>, ChainError> {
     match release {
-        ReleasePolicy::DirectRecipients | ReleasePolicy::Challenge(_) => Ok((0..holder_count)
+        ReleasePolicy::DirectRecipients
+        | ReleasePolicy::Challenge(_)
+        | ReleasePolicy::ShardedChallenge(_) => Ok((0..holder_count)
             .map(|_| Zeroizing::new(cek.to_vec()))
             .collect()),
         ReleasePolicy::Quorum(policy) => {
@@ -1621,7 +1776,9 @@ fn key_material_for_holders(
 
 const fn wrapped_key_bytes(release: &ReleasePolicy) -> usize {
     match release {
-        ReleasePolicy::DirectRecipients | ReleasePolicy::Challenge(_) => HPKE_WRAPPED_CEK_BYTES,
+        ReleasePolicy::DirectRecipients
+        | ReleasePolicy::Challenge(_)
+        | ReleasePolicy::ShardedChallenge(_) => HPKE_WRAPPED_CEK_BYTES,
         ReleasePolicy::Quorum(_) => HPKE_WRAPPED_SHARE_BYTES,
         _ => 0,
     }
@@ -1670,6 +1827,19 @@ pub(super) fn challenge_aad(core: &[u8]) -> Vec<u8> {
     aad
 }
 
+pub(super) fn shard_aad(core: &[u8], shard_index: u16) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(
+        SHARD_AAD_DOMAIN
+            .len()
+            .saturating_add(core.len())
+            .saturating_add(2),
+    );
+    aad.extend_from_slice(SHARD_AAD_DOMAIN);
+    put_u16(&mut aad, shard_index);
+    aad.extend_from_slice(core);
+    aad
+}
+
 fn key_slot_info(
     group_id: &GroupId,
     proposal_nonce: &[u8; 32],
@@ -1680,6 +1850,7 @@ fn key_slot_info(
         ReleasePolicy::DirectRecipients => HPKE_INFO_DOMAIN,
         ReleasePolicy::Quorum(_) => b"rebyte chain hpke witness share slot v2\0",
         ReleasePolicy::Challenge(_) => CHALLENGE_AUDIT_INFO_DOMAIN,
+        ReleasePolicy::ShardedChallenge(_) => SHARD_AUDIT_INFO_DOMAIN,
         _ => b"rebyte chain hpke unsupported slot v2\0",
     };
     let mut info = Vec::with_capacity(domain.len().saturating_add(96));
@@ -1765,7 +1936,9 @@ fn validate_contract_bindings(
         return Err(ChainError::InvalidContract);
     }
     match contract.release() {
-        ReleasePolicy::DirectRecipients | ReleasePolicy::Challenge(_)
+        ReleasePolicy::DirectRecipients
+        | ReleasePolicy::Challenge(_)
+        | ReleasePolicy::ShardedChallenge(_)
             if contract.recipients() == holders =>
         {
             Ok(())
@@ -1773,7 +1946,8 @@ fn validate_contract_bindings(
         ReleasePolicy::Quorum(policy) if policy.witnesses() == holders => Ok(()),
         ReleasePolicy::DirectRecipients
         | ReleasePolicy::Quorum(_)
-        | ReleasePolicy::Challenge(_) => Err(ChainError::InvalidContract),
+        | ReleasePolicy::Challenge(_)
+        | ReleasePolicy::ShardedChallenge(_) => Err(ChainError::InvalidContract),
         _ => Err(ChainError::UnsupportedReleasePolicy),
     }
 }
