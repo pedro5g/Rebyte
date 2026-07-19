@@ -393,6 +393,20 @@ enum CapsuleSubcommand {
     Apply(CapsuleApplyCommand),
     /// Decrypt and atomically apply an authorized semantic patch.
     Patch(CapsulePatchCommand),
+    /// Export a verified audit bundle without decrypting content.
+    Audit(CapsuleAuditCommand),
+}
+
+#[derive(Debug, Args)]
+struct CapsuleAuditCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    /// New audit bundle directory.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -948,6 +962,28 @@ struct ChallengeClaimReport {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CapsuleAuditReport {
+    schema_version: u16,
+    envelope_id: String,
+    envelope_blake3: String,
+    capsule: CapsuleReport,
+    identities: Vec<AuditIdentityReport>,
+    approvals: Vec<String>,
+    files: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditIdentityReport {
+    display_name: String,
+    identity_id: String,
+    fingerprint: String,
+    member: bool,
+    file: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CeremonyStatusReport {
     schema_version: u16,
     ceremony: &'static str,
@@ -1048,6 +1084,114 @@ fn run_capsule(command: &CapsuleCommand) -> Result<(), CliError> {
         CapsuleSubcommand::Diff(command) => diff_capsule_command(command),
         CapsuleSubcommand::Apply(command) => apply_capsule_command(command),
         CapsuleSubcommand::Patch(command) => patch_capsule_command(command),
+        CapsuleSubcommand::Audit(command) => audit_capsule_command(command),
+    }
+}
+
+fn audit_capsule_command(command: &CapsuleAuditCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    let envelope_bytes = envelope.to_bytes(&limits).map_err(chain_error)?;
+    let capsule = CapsuleReport::from_envelope(&envelope, envelope_bytes.len())?;
+
+    let members = envelope.proposal().group().proposal().members();
+    let member_ids = members
+        .iter()
+        .map(|member| Ok(member.identity_id().map_err(chain_error)?.to_base64()))
+        .collect::<Result<Vec<_>, CliError>>()?;
+    let mut identities: Vec<(String, &IdentityPublicDocument)> = Vec::new();
+    for document in members.iter().chain(envelope.proposal().key_holders()) {
+        let identity_id = document.identity_id().map_err(chain_error)?.to_base64();
+        if !identities.iter().any(|(known, _)| *known == identity_id) {
+            identities.push((identity_id, document));
+        }
+    }
+    let approvals = envelope
+        .approvals()
+        .iter()
+        .map(|approval| Ok(approval.member_id().map_err(chain_error)?.to_base64()))
+        .collect::<Result<Vec<_>, CliError>>()?;
+
+    fs::create_dir(&command.output)
+        .map_err(|error| output_error("audit bundle", &command.output, &error))?;
+    let identities_dir = command.output.join("identities");
+    fs::create_dir(&identities_dir)
+        .map_err(|error| output_error("audit identities", &identities_dir, &error))?;
+    let mut files = vec![
+        "audit.json".to_string(),
+        "group-certificate.json".to_string(),
+    ];
+    let certificate_path = command.output.join("group-certificate.json");
+    write_new(
+        &certificate_path,
+        &envelope.proposal().group().to_json().map_err(chain_error)?,
+        false,
+    )
+    .map_err(|error| output_error("group certificate", &certificate_path, &error))?;
+    let mut audit_identities = Vec::new();
+    for (identity_id, document) in &identities {
+        let file = format!("identities/{identity_id}.public.json");
+        let path = command.output.join(&file);
+        write_new(&path, &document.to_json().map_err(chain_error)?, false)
+            .map_err(|error| output_error("audit identity", &path, &error))?;
+        audit_identities.push(AuditIdentityReport {
+            display_name: document.display_name().to_string(),
+            identity_id: identity_id.clone(),
+            fingerprint: super::fingerprint::proquints(
+                document.identity_id().map_err(chain_error)?.as_bytes(),
+            ),
+            member: member_ids.contains(identity_id),
+            file: file.clone(),
+        });
+        files.push(file);
+    }
+
+    let report = CapsuleAuditReport {
+        schema_version: 1,
+        envelope_id: encode(envelope.envelope_id()),
+        envelope_blake3: blake3::hash(&envelope_bytes).to_hex().to_string(),
+        capsule,
+        identities: audit_identities,
+        approvals,
+        files,
+    };
+    let mut report_json = serde_json::to_vec_pretty(&report)
+        .map_err(|error| CliError::new(EXIT_GENERIC, format!("cannot encode audit: {error}")))?;
+    report_json.push(b'\n');
+    let report_path = command.output.join("audit.json");
+    write_new(&report_path, &report_json, false)
+        .map_err(|error| output_error("audit report", &report_path, &error))?;
+
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::success("✓ Audit bundle exported"));
+        print_capsule_report(&report.capsule);
+        println!("  Envelope ID   {}", report.envelope_id);
+        println!("  Envelope hash {}", report.envelope_blake3);
+        println!("  Identities");
+        for identity in &report.identities {
+            println!(
+                "    {}  {}  ({})",
+                identity.display_name,
+                identity.identity_id,
+                if identity.member {
+                    "member"
+                } else {
+                    "recipient"
+                }
+            );
+            println!(
+                "{}",
+                super::fingerprint::display_lines(&identity.fingerprint, "      ")
+            );
+        }
+        println!("  Output        {}", command.output.display());
+        println!(
+            "\nThe bundle proves structure, signatures and bindings only.\nContent stays encrypted; opening still requires a listed identity."
+        );
+        Ok(())
     }
 }
 
