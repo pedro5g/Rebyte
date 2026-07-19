@@ -498,7 +498,7 @@ fn verified_solution_key(
     }
 }
 
-fn derive_solution_key(
+pub(crate) fn derive_solution_key(
     solution: &[u8],
     policy: &ChallengeRelease,
 ) -> Result<Zeroizing<[u8; 32]>, ChainError> {
@@ -520,7 +520,7 @@ fn derive_solution_key(
     Ok(key)
 }
 
-fn solution_commitment(solution_key: &Zeroizing<[u8; 32]>) -> [u8; 32] {
+pub(crate) fn solution_commitment(solution_key: &Zeroizing<[u8; 32]>) -> [u8; 32] {
     domain_hash(COMMITMENT_CONTEXT, &[solution_key.as_ref()])
 }
 

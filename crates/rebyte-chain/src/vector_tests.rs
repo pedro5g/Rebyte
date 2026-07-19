@@ -86,6 +86,81 @@ fn group_formation_documents_are_frozen() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+const CHALLENGE_SOLUTION: &[u8] = b"vector challenge solution";
+const CHALLENGE_SALT: [u8; 16] = [0x5A; 16];
+const CHALLENGE_SOLUTION_KEY: &str =
+    "fea63fbda6df4722b0cc41342524077286fde096f3949982aa295a84532c573a";
+const CHALLENGE_COMMITMENT: &str =
+    "a936298ff8f55ec7affa508680a50aaa241f561d679501acfc5a1a49cb82db88";
+const CHALLENGE_PRIZE: &[u8] = b"vector prize\n";
+
+/// One finalized challenge envelope, generated once from the deterministic
+/// Alice identity and frozen. The same bytes seed the
+/// `decode_chain_envelope` fuzz corpus (`fuzz/corpus/.../challenge-slot`).
+const CHALLENGE_ENVELOPE_TOKEN: &str = include_str!("vectors/challenge-envelope-v1.token");
+
+#[test]
+fn challenge_kdf_and_commitment_are_frozen() -> Result<(), Box<dyn std::error::Error>> {
+    let policy = rebyte_contract::ChallengeRelease::new(
+        8 * 1_024,
+        1,
+        [0; 32],
+        CHALLENGE_SALT,
+        "vector hint".to_string(),
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let key = crate::challenge::derive_solution_key(CHALLENGE_SOLUTION, &policy)?;
+    assert_eq!(
+        hex(key.as_ref()),
+        CHALLENGE_SOLUTION_KEY,
+        "Argon2id solution derivation changed; every stored challenge would stop opening"
+    );
+    assert_eq!(
+        hex(&crate::challenge::solution_commitment(&key)),
+        CHALLENGE_COMMITMENT,
+        "commitment derivation changed; every stored challenge would stop opening"
+    );
+    Ok(())
+}
+
+#[test]
+fn frozen_challenge_envelope_still_solves() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{CapsuleEnvelope, ChainError, ChainLimits, OpenedContent, open_challenge_content};
+
+    let limits = ChainLimits::STANDARD;
+    let token = CHALLENGE_ENVELOPE_TOKEN.trim_end();
+    let envelope = CapsuleEnvelope::from_token(token, &limits)?;
+    assert_eq!(
+        envelope.to_token(&limits)?,
+        token,
+        "challenge envelope encoding changed; stored envelopes would stop round-tripping"
+    );
+    let OpenedContent::ExactArtifact(opened) =
+        open_challenge_content(&envelope, CHALLENGE_SOLUTION, &limits)?
+    else {
+        return Err("unexpected content kind".into());
+    };
+    let expected = rebyte_artifact_token::encode_artifact(
+        &rebyte_artifact_token::Artifact::file(CHALLENGE_PRIZE.to_vec(), false),
+        &rebyte_artifact_token::ArtifactOptions::default(),
+    )?
+    .into_binary();
+    assert_eq!(opened.artifact_binary(), expected);
+    assert!(matches!(
+        open_challenge_content(&envelope, b"wrong solution", &limits),
+        Err(ChainError::AuthenticationFailed)
+    ));
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _infallible = write!(out, "{byte:02x}");
+        out
+    })
+}
+
 #[test]
 fn frozen_documents_still_parse_canonically() -> Result<(), Box<dyn std::error::Error>> {
     let parsed = crate::IdentityPublicDocument::from_json(ALICE_PUBLIC_JSON.as_bytes())?;
