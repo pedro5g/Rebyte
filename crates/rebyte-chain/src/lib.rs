@@ -39,8 +39,9 @@ pub use challenge::{
     verify_sharded_challenge_claim,
 };
 pub use envelope::{
-    create_challenge_content_proposal_with_contract,
-    create_sharded_challenge_content_proposal_with_contract,
+    create_challenge_content_proposal_with_contract, create_key_sequence_capsule_proposal,
+    create_key_sequence_content_proposal_with_contract,
+    create_sharded_challenge_content_proposal_with_contract, open_key_sequence_capsule,
 };
 pub use status::{
     IdentityStatus, IdentityStatusDocument, deny_statused_identities, issue_identity_status,
@@ -64,8 +65,8 @@ pub use identity::{
 };
 pub use rebyte_contract::{
     AccessContract, AccessContractBuilder, Capabilities, Capability, ChallengeRelease,
-    ChallengeShard, ContentCommitment, ContentKind, ContractError, ContractId, PrincipalId,
-    QuorumRelease, ReleasePolicy, ShardedChallengeRelease,
+    ChallengeShard, ContentCommitment, ContentKind, ContractError, ContractId, KeySequenceRelease,
+    PrincipalId, QuorumRelease, ReleasePolicy, ShardedChallengeRelease,
 };
 pub use release::{
     MemoryReleaseLedger, ReleaseAuthorization, ReleaseGrant, ReleaseLedger, ReleaseRequest,
@@ -369,6 +370,83 @@ mod tests {
         let mut trailing = bytes;
         trailing.push(0);
         assert!(CapsuleEnvelope::from_bytes(&trailing, &limits).is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture covers every sequence abuse case.
+    fn key_sequences_open_only_with_every_key_in_order() -> Result<(), Box<dyn std::error::Error>> {
+        use super::{create_key_sequence_capsule_proposal, open_key_sequence_capsule};
+
+        let (creator_private, creator_public) = deterministic_identity(0x91, "Creator")?;
+        let (a1_private, a1_public) = deterministic_identity(0x92, "Alice laptop")?;
+        let (a2_private, a2_public) = deterministic_identity(0x93, "Alice vault")?;
+        let (b1_private, b1_public) = deterministic_identity(0x94, "Bob laptop")?;
+        let (b2_private, b2_public) = deterministic_identity(0x95, "Bob vault")?;
+        let creator = creator_private.unlock(TEST_PASSPHRASE)?;
+        let a1 = a1_private.unlock(TEST_PASSPHRASE)?;
+        let a2 = a2_private.unlock(TEST_PASSPHRASE)?;
+        let b1 = b1_private.unlock(TEST_PASSPHRASE)?;
+        let b2 = b2_private.unlock(TEST_PASSPHRASE)?;
+        let group_proposal = deterministic_group("Sequence owners", 1, vec![creator_public])?;
+        let group = finalize_group(
+            group_proposal.clone(),
+            vec![accept_group(&group_proposal, &creator)?],
+        )?;
+        let artifact = artifact_bytes()?;
+        let limits = ChainLimits::STANDARD;
+
+        assert!(matches!(
+            create_key_sequence_capsule_proposal(
+                group.clone(),
+                &artifact,
+                vec![vec![a1_public.clone(), a1_public.clone()]],
+                &limits,
+            ),
+            Err(ChainError::DuplicateIdentity)
+        ));
+
+        let proposal = create_key_sequence_capsule_proposal(
+            group,
+            &artifact,
+            vec![vec![a1_public, a2_public], vec![b1_public, b2_public]],
+            &limits,
+        )?;
+        let envelope = finalize_capsule(
+            proposal.clone(),
+            vec![approve_capsule(&proposal, &creator, &limits)?],
+            &limits,
+        )?;
+        let bytes = envelope.to_bytes(&limits)?;
+        let envelope = CapsuleEnvelope::from_bytes(&bytes, &limits)?;
+
+        let opened = open_key_sequence_capsule(&envelope, &[&a1, &a2], &limits)?;
+        assert_eq!(opened.artifact_binary(), artifact);
+        let opened = open_key_sequence_capsule(&envelope, &[&b1, &b2], &limits)?;
+        assert_eq!(opened.artifact_binary(), artifact);
+
+        assert!(matches!(
+            open_key_sequence_capsule(&envelope, &[&a2, &a1], &limits),
+            Err(ChainError::NotRecipient)
+        ));
+        assert!(matches!(
+            open_key_sequence_capsule(&envelope, &[&a1, &b2], &limits),
+            Err(ChainError::NotRecipient)
+        ));
+        assert!(matches!(
+            open_key_sequence_capsule(&envelope, &[&a2], &limits),
+            Err(ChainError::NotRecipient)
+        ));
+        assert!(matches!(
+            open_capsule(&envelope, &a2, &limits),
+            Err(ChainError::UnsupportedReleasePolicy)
+        ));
+
+        for offset in [bytes.len() - 40, bytes.len() / 2] {
+            let mut mutated = bytes.clone();
+            mutated[offset] ^= 0x01;
+            assert!(CapsuleEnvelope::from_bytes(&mutated, &limits).is_err());
+        }
         Ok(())
     }
 }

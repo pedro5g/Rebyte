@@ -19,14 +19,14 @@ use rebyte_chain::{
     ReleasePolicy, ReleaseRequest, ShardedChallengeProposalOptions, TrustedClock, UnlockedIdentity,
     accept_group, approve_capsule, backup_identity, capsule_ceremony_status,
     create_capsule_proposal, create_challenge_award, create_challenge_capsule_proposal,
-    create_challenge_claim, create_quorum_capsule_proposal, create_quorum_semantic_patch_proposal,
-    create_release_request, create_semantic_patch_proposal,
+    create_challenge_claim, create_key_sequence_capsule_proposal, create_quorum_capsule_proposal,
+    create_quorum_semantic_patch_proposal, create_release_request, create_semantic_patch_proposal,
     create_sharded_challenge_capsule_proposal, create_sharded_challenge_claim,
     deny_statused_identities, finalize_capsule, finalize_group, generate_identity, grant_release,
     group_ceremony_status, issue_identity_status, open_capsule, open_challenge_content,
-    open_quorum_content, open_semantic_patch, open_sharded_challenge_content, rekey_identity,
-    restore_identity, verify_challenge_claim, verify_challenge_shard,
-    verify_sharded_challenge_claim,
+    open_key_sequence_capsule, open_quorum_content, open_semantic_patch,
+    open_sharded_challenge_content, rekey_identity, restore_identity, verify_challenge_claim,
+    verify_challenge_shard, verify_sharded_challenge_claim,
 };
 use rebyte_core::{
     ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
@@ -435,6 +435,8 @@ enum CapsuleSubcommand {
     Inspect(CapsuleInspectCommand),
     /// Decrypt and reconstruct an artifact for an authorized recipient.
     Open(CapsuleOpenCommand),
+    /// Decrypt with every ordered key of one sequence recipient.
+    OpenSequence(CapsuleOpenSequenceCommand),
     /// Decrypt and compare an authorized artifact with a local root.
     Diff(CapsuleDiffCommand),
     /// Decrypt and transactionally apply an authorized artifact.
@@ -443,6 +445,28 @@ enum CapsuleSubcommand {
     Patch(CapsulePatchCommand),
     /// Export a verified audit bundle without decrypting content.
     Audit(CapsuleAuditCommand),
+}
+
+#[derive(Debug, Args)]
+struct CapsuleOpenSequenceCommand {
+    #[command(flatten)]
+    input: CapsuleInputArgs,
+    /// Passphrase-protected private identity; repeat in recipe order,
+    /// innermost key first.
+    #[arg(long = "key", value_name = "PATH", required = true)]
+    keys: Vec<PathBuf>,
+    /// Passphrase file per key in the same order; give one to reuse it.
+    #[arg(long = "passphrase-file", value_name = "PATH")]
+    passphrase_files: Vec<PathBuf>,
+    /// Reconstructed file or directory output.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Write the decrypted canonical `.rba` instead of reconstructing it.
+    #[arg(long)]
+    raw_artifact: bool,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -479,7 +503,11 @@ struct CapsuleCreateCommand {
     )]
     patch: Option<PathBuf>,
     /// Public recipient identity; repeat for every person allowed to open.
-    #[arg(long = "recipient", value_name = "PATH", required = true)]
+    #[arg(
+        long = "recipient",
+        value_name = "PATH",
+        required_unless_present = "recipient_sequences"
+    )]
     recipients: Vec<PathBuf>,
     /// Witness public identity; repeat to enable quorum release.
     #[arg(long = "witness", value_name = "PATH")]
@@ -501,6 +529,14 @@ struct CapsuleCreateCommand {
     /// Signed status document; listed identities reject the whole capsule.
     #[arg(long = "status-document", value_name = "PATH")]
     status_documents: Vec<PathBuf>,
+    /// Ordered comma-separated public identities, innermost key first;
+    /// repeat once per sequence recipient.
+    #[arg(
+        long = "recipient-sequence",
+        value_name = "PATHS",
+        conflicts_with_all = ["recipients", "witnesses", "patch", "challenge_solution_file"]
+    )]
+    recipient_sequences: Vec<String>,
     /// Secret solution file; repeat to shard the challenge into sub-puzzles.
     #[arg(
         long,
@@ -1298,6 +1334,7 @@ fn run_capsule(command: &CapsuleCommand) -> Result<(), CliError> {
         CapsuleSubcommand::Finalize(command) => finalize_capsule_command(command),
         CapsuleSubcommand::Inspect(command) => inspect_capsule(command),
         CapsuleSubcommand::Open(command) => open_capsule_command(command),
+        CapsuleSubcommand::OpenSequence(command) => open_sequence_capsule_command(command),
         CapsuleSubcommand::Diff(command) => diff_capsule_command(command),
         CapsuleSubcommand::Apply(command) => apply_capsule_command(command),
         CapsuleSubcommand::Patch(command) => patch_capsule_command(command),
@@ -1851,16 +1888,32 @@ fn create_capsule(command: &CapsuleCreateCommand) -> Result<(), CliError> {
         .iter()
         .map(|path| read_public_identity(path))
         .collect::<Result<Vec<_>, _>>()?;
+    let sequences = command
+        .recipient_sequences
+        .iter()
+        .map(|entry| {
+            entry
+                .split(',')
+                .map(|path| read_public_identity(Path::new(path.trim())))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let status_documents = read_status_documents(&command.status_documents)?;
     let mut participant_ids = Vec::new();
     for member in group.proposal().members() {
         participant_ids.push(member.identity_id().map_err(chain_error)?);
     }
-    for identity in recipients.iter().chain(&witnesses) {
+    for identity in recipients
+        .iter()
+        .chain(&witnesses)
+        .chain(sequences.iter().flatten())
+    {
         participant_ids.push(identity.identity_id().map_err(chain_error)?);
     }
     enforce_status_documents(&status_documents, &participant_ids, "capsule participant")?;
-    let proposal = if command.challenge_solution_file.len() == 1 {
+    let proposal = if !sequences.is_empty() {
+        create_key_sequence_capsule_proposal(group, &content, sequences, &limits)
+    } else if command.challenge_solution_file.len() == 1 {
         if command.challenge_threshold.is_some() || !command.challenge_shard_hints.is_empty() {
             return Err(CliError::new(
                 EXIT_GENERIC,
@@ -2078,6 +2131,70 @@ fn open_capsule_command(command: &CapsuleOpenCommand) -> Result<(), CliError> {
     let opened = open_capsule(&envelope, &identity, &limits).map_err(chain_error)?;
     let report = write_opened_artifact(&opened, &command.output, command.raw_artifact, &limits)?;
     emit_open_report(&report, command.json, "✓ Consensus capsule opened")
+}
+
+fn open_sequence_capsule_command(command: &CapsuleOpenSequenceCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let limits = ChainLimits::STANDARD;
+    let envelope = read_capsule_input(&command.input, &limits)?;
+    if !command.raw_artifact
+        && !envelope
+            .proposal()
+            .contract()
+            .capabilities()
+            .contains(Capability::Reconstruct)
+    {
+        return Err(CliError::new(
+            EXIT_POLICY,
+            "access contract does not grant reconstruction",
+        ));
+    }
+    if !command.passphrase_files.is_empty()
+        && command.passphrase_files.len() != 1
+        && command.passphrase_files.len() != command.keys.len()
+    {
+        return Err(CliError::new(
+            EXIT_GENERIC,
+            "give one --passphrase-file or exactly one per --key",
+        ));
+    }
+    let mut identities = Vec::with_capacity(command.keys.len());
+    for (index, key) in command.keys.iter().enumerate() {
+        let passphrase_file = match command.passphrase_files.len() {
+            0 => None,
+            1 => command.passphrase_files.first(),
+            _ => command.passphrase_files.get(index),
+        };
+        let passphrase = match passphrase_file {
+            Some(path) => read_passphrase_file(path)?,
+            None => {
+                return Err(CliError::new(
+                    EXIT_GENERIC,
+                    "sequence opening requires --passphrase-file inputs",
+                ));
+            }
+        };
+        let bytes =
+            read_private_bounded_nofollow(key, MAX_IDENTITY_DOCUMENT_BYTES).map_err(|error| {
+                CliError::new(
+                    EXIT_POLICY,
+                    format!(
+                        "cannot safely read Chain private identity {}: {error}",
+                        key.display()
+                    ),
+                )
+            })?;
+        let document = EncryptedIdentityDocument::from_json(&bytes).map_err(chain_error)?;
+        identities.push(
+            document
+                .unlock(passphrase.as_bytes())
+                .map_err(chain_error)?,
+        );
+    }
+    let keys: Vec<&UnlockedIdentity> = identities.iter().collect();
+    let opened = open_key_sequence_capsule(&envelope, &keys, &limits).map_err(chain_error)?;
+    let report = write_opened_artifact(&opened, &command.output, command.raw_artifact, &limits)?;
+    emit_open_report(&report, command.json, "✓ Key-sequence capsule opened")
 }
 
 fn write_opened_artifact(
@@ -3021,6 +3138,23 @@ impl CapsuleReport {
                     let recipients = identity_reports(holders)?;
                     (recipients, Vec::new(), None, None, None)
                 }
+                ReleasePolicy::KeySequence(_) => {
+                    let recipes = proposal.sequence_recipes().unwrap_or_default();
+                    let mut recipients = Vec::with_capacity(holders.len());
+                    for (holder, recipe) in holders.into_iter().zip(recipes) {
+                        let mut names = Vec::with_capacity(recipe.len() + 1);
+                        let mut ids = Vec::with_capacity(recipe.len() + 1);
+                        for identity in recipe.iter().chain(core::iter::once(holder)) {
+                            names.push(identity.display_name().to_string());
+                            ids.push(identity.identity_id().map_err(chain_error)?.to_base64());
+                        }
+                        recipients.push(CapsuleRecipientReport {
+                            display_name: names.join(" \u{2192} "),
+                            identity_id: ids.join(","),
+                        });
+                    }
+                    (recipients, Vec::new(), None, None, None)
+                }
                 ReleasePolicy::Quorum(policy) => {
                     let recipients = proposal
                         .contract()
@@ -3063,6 +3197,7 @@ impl CapsuleReport {
                 ReleasePolicy::Quorum(_) => "quorum",
                 ReleasePolicy::Challenge(_) => "challenge",
                 ReleasePolicy::ShardedChallenge(_) => "shardedChallenge",
+                ReleasePolicy::KeySequence(_) => "keySequence",
                 _ => "unknown",
             },
             recipient_count: recipients.len(),

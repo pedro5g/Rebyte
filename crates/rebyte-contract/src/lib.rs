@@ -28,6 +28,8 @@ const MAX_CHALLENGE_HINT_BYTES: usize = 1_024;
 const MAX_CHALLENGE_SHARDS: usize = 32;
 const MIN_CHALLENGE_SHARDS: usize = 2;
 const MAX_SHARD_HINT_BYTES: usize = 128;
+const MIN_SEQUENCE_DEPTH: u16 = 2;
+const MAX_SEQUENCE_DEPTH: u16 = 8;
 const MAX_TOKEN_BYTES: usize = 22 * 1_024;
 const CONTRACT_ID_CONTEXT: &str = "Rebyte access contract id v1 2026-07-18";
 
@@ -552,6 +554,45 @@ impl ShardedChallengeRelease {
     }
 }
 
+/// Nested key-sequence release parameters.
+///
+/// Every recipient of the capsule is an ordered sequence of exactly `depth`
+/// independent identities; the content key is wrapped in nested HPKE layers
+/// and opening requires every listed private key applied in reverse order.
+/// The security gain is storage separation, never key arithmetic: each
+/// position is an ordinary identity with its own lifecycle, and two sequence
+/// keys stored together provide essentially the security of one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeySequenceRelease {
+    depth: u16,
+}
+
+impl KeySequenceRelease {
+    /// Creates a canonical key-sequence release policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] for a depth outside 2–8.
+    pub fn new(depth: u16) -> Result<Self, ContractError> {
+        let policy = Self { depth };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    /// Returns how many independent keys every recipient sequence requires.
+    #[must_use]
+    pub const fn depth(self) -> u16 {
+        self.depth
+    }
+
+    fn validate(self) -> Result<(), ContractError> {
+        if !(MIN_SEQUENCE_DEPTH..=MAX_SEQUENCE_DEPTH).contains(&self.depth) {
+            return Err(ContractError::InvalidThreshold);
+        }
+        Ok(())
+    }
+}
+
 /// Cryptographic mechanism controlling release of the content key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -564,6 +605,8 @@ pub enum ReleasePolicy {
     Challenge(ChallengeRelease),
     /// The content key is split into shares released by sub-challenges.
     ShardedChallenge(ShardedChallengeRelease),
+    /// Every recipient is an ordered sequence of independent keys.
+    KeySequence(KeySequenceRelease),
 }
 
 /// Builder for an immutable access contract.
@@ -882,6 +925,7 @@ impl AccessContract {
             ReleasePolicy::Quorum(policy) => policy.validate()?,
             ReleasePolicy::Challenge(policy) => policy.validate()?,
             ReleasePolicy::ShardedChallenge(policy) => policy.validate()?,
+            ReleasePolicy::KeySequence(policy) => policy.validate()?,
             ReleasePolicy::DirectRecipients => {}
         }
         Ok(())
@@ -1077,6 +1121,9 @@ fn read_release(reader: &mut Reader<'_>) -> Result<ReleasePolicy, ContractError>
                 hint,
             })
         }
+        5 => ReleasePolicy::KeySequence(KeySequenceRelease {
+            depth: reader.u16()?,
+        }),
         _ => return Err(ContractError::UnsupportedValue),
     };
     Ok(release)
@@ -1103,6 +1150,10 @@ fn put_release(output: &mut Vec<u8>, release: &ReleasePolicy) -> Result<(), Cont
                 u16::try_from(policy.hint.len()).map_err(|_| ContractError::LengthOverflow)?,
             );
             output.extend_from_slice(policy.hint.as_bytes());
+        }
+        ReleasePolicy::KeySequence(policy) => {
+            output.push(5);
+            put_u16(output, policy.depth);
         }
         ReleasePolicy::ShardedChallenge(policy) => {
             output.push(4);

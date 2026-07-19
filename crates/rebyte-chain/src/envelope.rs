@@ -58,6 +58,9 @@ const CHALLENGE_AAD_DOMAIN: &[u8] = b"rebyte chain challenge wrap aad v1\0";
 const CHALLENGE_AUDIT_INFO_DOMAIN: &[u8] = b"rebyte chain hpke challenge audit slot v1\0";
 pub(super) const SHARD_WRAPPED_SHARE_BYTES: usize = SHARE_BYTES + HPKE_TAG_BYTES;
 const SHARD_AAD_DOMAIN: &[u8] = b"rebyte chain challenge shard wrap aad v1\0";
+const SEQUENCE_INFO_DOMAIN: &[u8] = b"rebyte chain hpke key sequence slot v1\0";
+const SEQUENCE_PRINCIPAL_CONTEXT: &str = "Rebyte Chain key sequence principal v1 2026-07-19";
+const SEQUENCE_LAYER_BYTES: usize = HPKE_ENCAPPED_KEY_BYTES + HPKE_TAG_BYTES;
 const SHARD_AUDIT_INFO_DOMAIN: &[u8] = b"rebyte chain hpke sharded challenge audit slot v1\0";
 const PAYLOAD_TAG_BYTES: usize = 16;
 
@@ -159,6 +162,7 @@ pub struct CapsuleProposal {
     ciphertext: Vec<u8>,
     challenge: Option<ChallengeSlot>,
     shard_slots: Option<Vec<ChallengeShardSlot>>,
+    sequence_recipes: Option<Vec<Vec<IdentityPublicDocument>>>,
     proposal_id: [u8; 32],
 }
 
@@ -230,6 +234,21 @@ impl CapsuleProposal {
         } else {
             None
         };
+        let sequence_recipes = if let ReleasePolicy::KeySequence(policy) = contract.release() {
+            let inner_layers = usize::from(policy.depth()).saturating_sub(1);
+            let mut recipes = Vec::with_capacity(slot_count);
+            for _ in 0..slot_count {
+                let mut recipe = Vec::with_capacity(inner_layers);
+                for _ in 0..inner_layers {
+                    let identity_bytes = reader.bytes_u32(MAX_IDENTITY_DOCUMENT_BYTES)?;
+                    recipe.push(IdentityPublicDocument::from_json(&identity_bytes)?);
+                }
+                recipes.push(recipe);
+            }
+            Some(recipes)
+        } else {
+            None
+        };
         let proposal_id = reader.array()?;
         reader.finish()?;
         let proposal = Self {
@@ -243,6 +262,7 @@ impl CapsuleProposal {
             ciphertext,
             challenge,
             shard_slots,
+            sequence_recipes,
             proposal_id,
         };
         proposal.validate(limits)?;
@@ -300,6 +320,13 @@ impl CapsuleProposal {
                 output.extend_from_slice(&shard_slot.wrapped_share);
             }
         }
+        if let Some(recipes) = &self.sequence_recipes {
+            for recipe in recipes {
+                for identity in recipe {
+                    put_bytes_u32(&mut output, &identity.to_json()?)?;
+                }
+            }
+        }
         output.extend_from_slice(&self.proposal_id);
         enforce_length(output.len(), limits.max_envelope_bytes)?;
         Ok(output)
@@ -342,6 +369,16 @@ impl CapsuleProposal {
 
     pub(super) fn shard_slot(&self, index: usize) -> Option<&ChallengeShardSlot> {
         self.shard_slots.as_ref().and_then(|slots| slots.get(index))
+    }
+
+    /// Returns the ordered inner recipe of every sequence slot, if any.
+    ///
+    /// Entries align with the slot order; each recipe lists the inner
+    /// identities from the innermost layer outward, and the slot holder is
+    /// the outermost key.
+    #[must_use]
+    pub fn sequence_recipes(&self) -> Option<&[Vec<IdentityPublicDocument>]> {
+        self.sequence_recipes.as_deref()
     }
 
     // Callers must have validated this proposal on the current data.
@@ -393,6 +430,25 @@ impl CapsuleProposal {
             }
             (_, None) => {}
         }
+        match (self.contract.release(), &self.sequence_recipes) {
+            (ReleasePolicy::KeySequence(policy), Some(recipes))
+                if recipes.len() == self.slots.len() =>
+            {
+                let inner_layers = usize::from(policy.depth()).saturating_sub(1);
+                for recipe in recipes {
+                    if recipe.len() != inner_layers {
+                        return Err(ChainError::BindingMismatch);
+                    }
+                    for identity in recipe {
+                        identity.validate()?;
+                    }
+                }
+            }
+            (ReleasePolicy::KeySequence(_), _) | (_, Some(_)) => {
+                return Err(ChainError::BindingMismatch);
+            }
+            (_, None) => {}
+        }
         let mut previous = None;
         let mut holder_ids = Vec::with_capacity(self.slots.len());
         for slot in &self.slots {
@@ -417,6 +473,7 @@ impl CapsuleProposal {
             &self.content_digest,
             self.content_size,
             &holder_ids,
+            self.sequence_recipes.as_deref(),
         )?;
         if calculate_proposal_id(self)? != self.proposal_id {
             return Err(ChainError::BindingMismatch);
@@ -1027,6 +1084,356 @@ pub fn create_sharded_challenge_content_proposal_with_contract(
     )
 }
 
+/// Encrypts one exact artifact for ordered key-sequence recipients.
+///
+/// Every sequence lists independent identities from the innermost layer to
+/// the outermost; opening applies the private keys in reverse listed order.
+/// All sequences in one capsule share one depth, no sequence may repeat an
+/// identity, and outermost identities must be distinct across sequences.
+/// The gain is storage separation only: keys stored together provide
+/// essentially the security of one key.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] for empty, uneven, duplicate or oversized
+/// sequences, invalid identities or content, or a cryptographic failure.
+pub fn create_key_sequence_capsule_proposal(
+    group: GroupCertificate,
+    artifact_binary: &[u8],
+    sequences: Vec<Vec<IdentityPublicDocument>>,
+    limits: &ChainLimits,
+) -> Result<CapsuleProposal, ChainError> {
+    group.validate()?;
+    let depth = sequences.first().map(Vec::len).unwrap_or_default();
+    if sequences.is_empty() || sequences.iter().any(|sequence| sequence.len() != depth) {
+        return Err(ChainError::InvalidContract);
+    }
+    let policy = rebyte_contract::KeySequenceRelease::new(
+        u16::try_from(depth).map_err(|_| ChainError::LengthOverflow)?,
+    )
+    .map_err(map_contract_error)?;
+    let mut recipient_ids = Vec::with_capacity(sequences.len());
+    for sequence in &sequences {
+        for identity in sequence {
+            identity.validate()?;
+        }
+        let (inner, outer) = sequence.split_at(depth.saturating_sub(1));
+        let outer_id = outer[0].identity_id_unchecked()?;
+        recipient_ids.push(sequence_principal_for(inner, outer_id)?);
+    }
+    let content_digest = protected_content_digest(artifact_binary);
+    let content_size =
+        u64::try_from(artifact_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
+    let group_id = group.group_id_unchecked()?;
+    let controllers = group
+        .proposal()
+        .members()
+        .iter()
+        .map(IdentityPublicDocument::identity_id_unchecked)
+        .map(|result| result.map(principal_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let contract = AccessContract::builder(
+        PrincipalId::from_bytes(*group_id.as_bytes()),
+        ContentCommitment::new(ContentKind::ExactArtifact, content_digest, content_size),
+    )
+    .controllers(controllers, group.capsule_threshold())
+    .recipients(recipient_ids)
+    .capabilities(Capabilities::APPLY_EXACT)
+    .release(ReleasePolicy::KeySequence(policy))
+    .build()
+    .map_err(map_contract_error)?;
+    create_key_sequence_content_proposal_with_contract(
+        group,
+        artifact_binary,
+        sequences,
+        contract,
+        limits,
+    )
+}
+
+/// Encrypts canonical content behind an existing key-sequence contract.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] for a non-sequence contract, sequences that do not
+/// match the contract recipients, invalid content or a cryptographic
+/// failure.
+#[allow(clippy::too_many_lines)] // One pass builds every nested sequence slot.
+pub fn create_key_sequence_content_proposal_with_contract(
+    group: GroupCertificate,
+    content_binary: &[u8],
+    sequences: Vec<Vec<IdentityPublicDocument>>,
+    contract: AccessContract,
+    limits: &ChainLimits,
+) -> Result<CapsuleProposal, ChainError> {
+    group.validate()?;
+    let ReleasePolicy::KeySequence(policy) = contract.release() else {
+        return Err(ChainError::UnsupportedReleasePolicy);
+    };
+    let depth = usize::from(policy.depth());
+    validate_plaintext_content(content_binary, contract.content().kind(), limits)?;
+    if sequences.is_empty()
+        || sequences.len() > MAX_RECIPIENTS
+        || sequences.iter().any(|sequence| sequence.len() != depth)
+    {
+        return Err(ChainError::InvalidContract);
+    }
+    let mut ordered = Vec::with_capacity(sequences.len());
+    for sequence in sequences {
+        for identity in &sequence {
+            identity.validate()?;
+        }
+        let outer_id = sequence[depth - 1].identity_id_unchecked()?;
+        ordered.push((outer_id, sequence));
+    }
+    ordered.sort_by_key(|entry| entry.0);
+    let holder_ids: Vec<IdentityId> = ordered.iter().map(|entry| entry.0).collect();
+    let recipes: Vec<Vec<IdentityPublicDocument>> = ordered
+        .iter()
+        .map(|entry| entry.1[..depth - 1].to_vec())
+        .collect();
+    let content_digest = protected_content_digest(content_binary);
+    let content_size =
+        u64::try_from(content_binary.len()).map_err(|_| ChainError::LengthOverflow)?;
+    validate_contract_bindings(
+        &group,
+        &contract,
+        &content_digest,
+        content_size,
+        &holder_ids,
+        Some(&recipes),
+    )?;
+
+    let group_id = group.group_id_unchecked()?;
+    let mut cek = Zeroizing::new([0_u8; CEK_BYTES]);
+    let mut proposal_nonce = [0_u8; 32];
+    let mut payload_nonce = [0_u8; PAYLOAD_NONCE_BYTES];
+    getrandom::fill(cek.as_mut()).map_err(|_| ChainError::EntropyUnavailable)?;
+    getrandom::fill(&mut proposal_nonce).map_err(|_| ChainError::EntropyUnavailable)?;
+    getrandom::fill(&mut payload_nonce).map_err(|_| ChainError::EntropyUnavailable)?;
+    let core = proposal_core(&group, &contract, &proposal_nonce, &payload_nonce)?;
+    let core_digest = domain_hash("Rebyte Chain proposal core digest v2 2026-07-18", &[&core]);
+    let payload_cipher = XChaCha20Poly1305::new_from_slice(cek.as_ref())
+        .map_err(|_| ChainError::CryptographicFailure)?;
+    let ciphertext = payload_cipher
+        .encrypt(
+            &XNonce::from(payload_nonce),
+            Payload {
+                msg: content_binary,
+                aad: &payload_aad(&core),
+            },
+        )
+        .map_err(|_| ChainError::CryptographicFailure)?;
+
+    let mut slots = Vec::with_capacity(ordered.len());
+    for (_, sequence) in &ordered {
+        let mut layer = Zeroizing::new(cek.to_vec());
+        let mut outer: Option<([u8; HPKE_ENCAPPED_KEY_BYTES], Vec<u8>)> = None;
+        for (position, identity) in sequence.iter().enumerate() {
+            let public_key = HpkePublicKey::from_bytes(&identity.encryption_public_key()?)
+                .map_err(|_| ChainError::InvalidPublicKey)?;
+            let info = sequence_slot_info(
+                &group_id,
+                &proposal_nonce,
+                &identity.identity_id_unchecked()?,
+                position,
+            )?;
+            let (encapped_key, wrapped) =
+                single_shot_seal::<HpkeChaCha20Poly1305, HkdfSha256, ChainKem>(
+                    &OpModeS::Base,
+                    &public_key,
+                    &info,
+                    layer.as_ref(),
+                    &core_digest,
+                )
+                .map_err(|_| ChainError::CryptographicFailure)?;
+            let encapped_key: [u8; HPKE_ENCAPPED_KEY_BYTES] = encapped_key
+                .to_bytes()
+                .as_slice()
+                .try_into()
+                .map_err(|_| ChainError::CryptographicFailure)?;
+            if position == depth - 1 {
+                outer = Some((encapped_key, wrapped));
+            } else {
+                let mut next = Zeroizing::new(Vec::with_capacity(
+                    HPKE_ENCAPPED_KEY_BYTES.saturating_add(wrapped.len()),
+                ));
+                next.extend_from_slice(&encapped_key);
+                next.extend_from_slice(&wrapped);
+                layer = next;
+            }
+        }
+        let (encapped_key, wrapped_key) = outer.ok_or(ChainError::CryptographicFailure)?;
+        if wrapped_key.len() != wrapped_key_bytes(contract.release()) {
+            return Err(ChainError::CryptographicFailure);
+        }
+        slots.push(KeySlot {
+            holder: sequence[depth - 1].clone(),
+            encapped_key,
+            wrapped_key,
+        });
+    }
+
+    let mut proposal = CapsuleProposal {
+        group,
+        contract,
+        proposal_nonce,
+        content_digest,
+        content_size,
+        payload_nonce,
+        slots,
+        ciphertext,
+        challenge: None,
+        shard_slots: None,
+        sequence_recipes: Some(recipes),
+        proposal_id: [0; 32],
+    };
+    proposal.proposal_id = calculate_proposal_id(&proposal)?;
+    proposal.validate(limits)?;
+    Ok(proposal)
+}
+
+/// Opens a key-sequence capsule with every listed key, inner layer first.
+///
+/// Pass the unlocked identities in exactly the published recipe order; the
+/// implementation applies them in reverse. A missing or wrong key at any
+/// position fails closed without revealing which deeper layers would have
+/// succeeded.
+///
+/// # Errors
+///
+/// Returns [`ChainError::NotRecipient`] when no slot matches the exact
+/// ordered identity list, or another [`ChainError`] for a wrong key,
+/// non-sequence policy or invalid envelope.
+#[allow(clippy::too_many_lines)] // One pass walks every nested layer fail-closed.
+pub fn open_key_sequence_capsule(
+    envelope: &CapsuleEnvelope,
+    keys: &[&UnlockedIdentity],
+    limits: &ChainLimits,
+) -> Result<OpenedCapsule, ChainError> {
+    envelope.validate(limits)?;
+    let ReleasePolicy::KeySequence(policy) = envelope.proposal.contract.release() else {
+        return Err(ChainError::UnsupportedReleasePolicy);
+    };
+    if envelope.proposal.contract.content().kind() != ContentKind::ExactArtifact {
+        return Err(ChainError::InvalidContent);
+    }
+    if !envelope
+        .proposal
+        .contract
+        .capabilities()
+        .contains(Capability::Decrypt)
+    {
+        return Err(ChainError::InvalidContract);
+    }
+    let depth = usize::from(policy.depth());
+    if keys.len() != depth {
+        return Err(ChainError::NotRecipient);
+    }
+    let key_ids: Vec<IdentityId> = keys.iter().map(|key| key.identity_id()).collect();
+    let recipes = envelope
+        .proposal
+        .sequence_recipes
+        .as_ref()
+        .ok_or(ChainError::BindingMismatch)?;
+    let slot_index = envelope
+        .proposal
+        .slots
+        .iter()
+        .zip(recipes)
+        .position(|(slot, recipe)| {
+            slot.holder
+                .identity_id_unchecked()
+                .is_ok_and(|outer| outer == key_ids[depth - 1])
+                && recipe.len() == depth - 1
+                && recipe.iter().zip(&key_ids).all(|(identity, expected)| {
+                    identity
+                        .identity_id_unchecked()
+                        .is_ok_and(|candidate| candidate == *expected)
+                })
+        })
+        .ok_or(ChainError::NotRecipient)?;
+    let slot = &envelope.proposal.slots[slot_index];
+    let recipe = &recipes[slot_index];
+    let composite = sequence_principal_for(recipe, key_ids[depth - 1])?;
+
+    let group_id = envelope.proposal.group.group_id_unchecked()?;
+    let core = proposal_core(
+        &envelope.proposal.group,
+        &envelope.proposal.contract,
+        &envelope.proposal.proposal_nonce,
+        &envelope.proposal.payload_nonce,
+    )?;
+    let core_digest = domain_hash("Rebyte Chain proposal core digest v2 2026-07-18", &[&core]);
+    let mut encapped_bytes = slot.encapped_key;
+    let mut wrapped = Zeroizing::new(slot.wrapped_key.clone());
+    for position in (0..depth).rev() {
+        let identity = keys[position];
+        let info = sequence_slot_info(
+            &group_id,
+            &envelope.proposal.proposal_nonce,
+            &key_ids[position],
+            position,
+        )?;
+        let encapped_key = <ChainKem as hpke::Kem>::EncappedKey::from_bytes(&encapped_bytes)
+            .map_err(|_| ChainError::CryptographicFailure)?;
+        let plain = Zeroizing::new(
+            single_shot_open::<HpkeChaCha20Poly1305, HkdfSha256, ChainKem>(
+                &OpModeR::Base,
+                &identity.hpke_private_key(),
+                &encapped_key,
+                &info,
+                &wrapped,
+                &core_digest,
+            )
+            .map_err(|_| ChainError::CryptographicFailure)?,
+        );
+        if position == 0 {
+            if plain.len() != CEK_BYTES {
+                return Err(ChainError::CryptographicFailure);
+            }
+            let decrypted = decrypt_payload_core(
+                envelope,
+                IdentityId::from_bytes(*composite.as_bytes()),
+                plain.as_slice(),
+                limits,
+            )?;
+            return Ok(OpenedCapsule {
+                artifact_binary: decrypted.bytes,
+                contract_id: decrypted.contract_id,
+                group_id: decrypted.group_id,
+                proposal_id: decrypted.proposal_id,
+                recipient_id: decrypted.recipient_id,
+            });
+        }
+        if plain.len() <= HPKE_ENCAPPED_KEY_BYTES {
+            return Err(ChainError::CryptographicFailure);
+        }
+        encapped_bytes.copy_from_slice(&plain[..HPKE_ENCAPPED_KEY_BYTES]);
+        let mut next = Zeroizing::new(plain[HPKE_ENCAPPED_KEY_BYTES..].to_vec());
+        core::mem::swap(&mut wrapped, &mut next);
+    }
+    Err(ChainError::CryptographicFailure)
+}
+
+fn sequence_slot_info(
+    group_id: &GroupId,
+    proposal_nonce: &[u8; 32],
+    holder_id: &IdentityId,
+    position: usize,
+) -> Result<Vec<u8>, ChainError> {
+    let mut info = Vec::with_capacity(SEQUENCE_INFO_DOMAIN.len().saturating_add(98));
+    info.extend_from_slice(SEQUENCE_INFO_DOMAIN);
+    info.extend_from_slice(group_id.as_bytes());
+    info.extend_from_slice(proposal_nonce);
+    info.extend_from_slice(holder_id.as_bytes());
+    put_u16(
+        &mut info,
+        u16::try_from(position).map_err(|_| ChainError::LengthOverflow)?,
+    );
+    Ok(info)
+}
+
 #[allow(clippy::too_many_lines)] // One pass builds every policy-specific key slot.
 fn create_proposal_with_holders(
     group: GroupCertificate,
@@ -1052,6 +1459,7 @@ fn create_proposal_with_holders(
         &content_digest,
         content_size,
         &holder_ids,
+        None,
     )?;
 
     let group_id = group.group_id_unchecked()?;
@@ -1180,6 +1588,7 @@ fn create_proposal_with_holders(
         ciphertext,
         challenge,
         shard_slots,
+        sequence_recipes: None,
         proposal_id: [0; 32],
     };
     proposal.proposal_id = calculate_proposal_id(&proposal)?;
@@ -1716,6 +2125,13 @@ fn calculate_proposal_id(proposal: &CapsuleProposal) -> Result<[u8; 32], ChainEr
             slots.extend_from_slice(&shard_slot.wrapped_share);
         }
     }
+    if let Some(recipes) = &proposal.sequence_recipes {
+        for recipe in recipes {
+            for identity in recipe {
+                slots.extend_from_slice(identity.identity_id_unchecked()?.as_bytes());
+            }
+        }
+    }
     let ciphertext_digest = domain_hash(
         "Rebyte Chain ciphertext digest v2 2026-07-18",
         &[&proposal.ciphertext],
@@ -1780,6 +2196,7 @@ const fn wrapped_key_bytes(release: &ReleasePolicy) -> usize {
         | ReleasePolicy::Challenge(_)
         | ReleasePolicy::ShardedChallenge(_) => HPKE_WRAPPED_CEK_BYTES,
         ReleasePolicy::Quorum(_) => HPKE_WRAPPED_SHARE_BYTES,
+        ReleasePolicy::KeySequence(policy) => SEQUENCE_LAYER_BYTES * policy.depth() as usize,
         _ => 0,
     }
 }
@@ -1903,6 +2320,7 @@ fn validate_contract_bindings(
     content_digest: &[u8; 32],
     content_size: u64,
     holder_ids: &[IdentityId],
+    sequence_recipes: Option<&[Vec<IdentityPublicDocument>]>,
 ) -> Result<(), ChainError> {
     let contract_bytes = contract
         .to_bytes()
@@ -1944,12 +2362,56 @@ fn validate_contract_bindings(
             Ok(())
         }
         ReleasePolicy::Quorum(policy) if policy.witnesses() == holders => Ok(()),
+        ReleasePolicy::KeySequence(_) => {
+            let recipes = sequence_recipes.ok_or(ChainError::BindingMismatch)?;
+            if recipes.len() != holder_ids.len() {
+                return Err(ChainError::BindingMismatch);
+            }
+            let mut composites = Vec::with_capacity(recipes.len());
+            for (recipe, holder_id) in recipes.iter().zip(holder_ids) {
+                composites.push(sequence_principal_for(recipe, *holder_id)?);
+            }
+            composites.sort_unstable();
+            if composites.windows(2).any(|pair| pair[0] == pair[1])
+                || contract.recipients() != composites
+            {
+                return Err(ChainError::InvalidContract);
+            }
+            Ok(())
+        }
         ReleasePolicy::DirectRecipients
         | ReleasePolicy::Quorum(_)
         | ReleasePolicy::Challenge(_)
         | ReleasePolicy::ShardedChallenge(_) => Err(ChainError::InvalidContract),
         _ => Err(ChainError::UnsupportedReleasePolicy),
     }
+}
+
+// One sequence is one composite recipient: the ordered identity list, inner
+// layer first, hashed under a dedicated domain. Reordering, dropping or
+// substituting any position produces a different principal.
+fn sequence_principal_for(
+    inner_recipe: &[IdentityPublicDocument],
+    outer_id: IdentityId,
+) -> Result<PrincipalId, ChainError> {
+    let mut ids = Vec::with_capacity(inner_recipe.len().saturating_add(1));
+    for identity in inner_recipe {
+        ids.push(identity.identity_id_unchecked()?);
+    }
+    ids.push(outer_id);
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ChainError::DuplicateIdentity);
+    }
+    let mut bytes = Vec::with_capacity(ids.len().saturating_mul(32));
+    for id in &ids {
+        bytes.extend_from_slice(id.as_bytes());
+    }
+    Ok(PrincipalId::from_bytes(domain_hash(
+        SEQUENCE_PRINCIPAL_CONTEXT,
+        &[&bytes],
+    )))
 }
 
 const fn principal_id(identity_id: IdentityId) -> PrincipalId {
