@@ -261,6 +261,27 @@ BLAKE3 hash, the group certificate, approving member IDs, and one reusable
 public identity document with proquint fingerprint per participant. Archive
 one bundle per delivered capsule; content stays encrypted inside it.
 
+## TPM-backed release ledger — integration contract
+
+A production quorum witness needs a `ReleaseLedger` whose monotonic state
+cannot be rolled back by restoring a disk snapshot. A TPM 2.0 NV monotonic
+counter is the natural anchor, but Rebyte deliberately does not ship an
+in-tree adapter: the `tss-esapi` stack binds to platform C libraries and
+cannot be honestly tested in this project's environments, and an untested
+security component is worse than a documented gap. An adapter written
+against real hardware must guarantee, in `ReleaseLedger::authorize` terms:
+
+1. increment the NV counter (or prove the stored ordinal) **before**
+   invoking `issue`, and persist the authorization only after `issue`
+   succeeds;
+2. replay a repeated request ID with its original ordinal without consuming
+   a new allowance, keeping the request-ID map in storage whose integrity is
+   bound to the counter value;
+3. fail closed with `ReleaseAuthorityUnavailable` whenever the counter
+   cannot be read, incremented or proven — never fall back to file state;
+4. treat a counter mismatch after restore as permanent: require a reviewed
+   migration to a new contract, exactly like the file-ledger rule below.
+
 ## Rotation, compromise and recovery
 
 Chain envelope v2 has no online revocation service. Rotation creates a new

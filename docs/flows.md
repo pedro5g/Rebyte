@@ -185,28 +185,28 @@ flowchart LR
 
 A challenge is a cost gate, not access control: anyone holding the envelope
 may search, the race is irrevocable after publication, and real confidential
-data must never sit behind one. Reference:
+data must never sit behind one. Repeating the solution file shards the
+challenge: the content key splits into Shamir shares, one per sub-solution,
+`chain challenge check` verifies each shard as durable team progress, and any
+threshold of solved shards opens the capsule. Reference:
 [Challenge v1](../schemas/challenge-v1.md).
 
-## Draft flows — not implemented
-
-The following diagram describes a design draft only
-([Key Sequence v1](../schemas/key-sequence-v1.md)). No release implements it.
-
-### Key sequence (draft)
+## Key sequence capsule
 
 ```mermaid
 flowchart LR
-    CEK[content key] --> L1[HPKE layer · key 1]
+    CEK[content key] --> L1[HPKE layer · key 1 innermost]
     L1 --> L2[HPKE layer · key 2]
-    L2 --> L3[HPKE layer · key n]
-    L3 --> ENV[envelope + ordered public recipe]
-    ENV --> U3[unwrap with private key n]
-    U3 --> U2[unwrap with private key 2]
-    U2 --> U1[unwrap with private key 1]
+    L2 --> L3[HPKE layer · key n outermost]
+    L3 --> ENV[envelope + ordered public recipe<br/>capsule create --recipient-sequence]
+    ENV --> U3[open-sequence unwraps with key n]
+    U3 --> U2[then key 2]
+    U2 --> U1[then key 1]
     U1 --> OPEN[verified plaintext]
 ```
 
-The gain is custody separation — each key on a different device or location.
-Keys are never derived from other keys; every position is an ordinary
-identity with its own backup lifecycle.
+The gain is custody separation — each key on a different device or location;
+keys stored together provide essentially the security of one. Keys are never
+derived from other keys; every position is an ordinary identity with its own
+backup lifecycle, and losing any one key loses access. Reference:
+[Key Sequence v1](../schemas/key-sequence-v1.md).

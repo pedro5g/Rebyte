@@ -36,6 +36,16 @@ workspace and several critical modules still do not meet the stated 90%/95%
 targets. A release must report this gap honestly rather than relabeling tested
 behavior as independently audited assurance.
 
+On 2026-07-19 the unreleased workspace adds targeted edge tests for the four
+weakest review-flagged modules. Portable paths now measure 100% in-crate,
+verification, filesystem apply and artifact streaming each gained
+error-display, staged-typestate, interrupted-transaction and
+conflicting-output tests, and the transaction engine's incomplete-transaction
+and corrupted-journal failsafes are exercised directly. Workspace totals
+temporarily include the new sharded-challenge, key-sequence, ceremony, audit
+and rekey CLI surface, whose subprocess-driven coverage remains below target;
+the honest reading is per-module, and the 90%/95% targets stay open work.
+
 Scheduled CI publishes `lcov.info` and Criterion estimates. Reviewers compare
 critical-operation medians against the most recent accepted artifact. A
 regression over 10% requires investigation; a regression over 20% blocks a

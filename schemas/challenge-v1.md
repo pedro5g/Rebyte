@@ -69,14 +69,51 @@ ChallengeSlot {
 - The challenge wrap uses associated data bound to the proposal core digest,
   so hints, contract and ciphertext cannot be recombined.
 
-## Sharded challenges — draft extension
+## Sharded challenges
 
-To reduce luck variance and support teams, a future version MAY split the CEK
-into `N` Shamir shares over GF(256) with threshold `T`, each share wrapped
-under an independent sub-solution. A team divides sub-puzzles among its
-members and pools recovered shares; a lone solver grinds them sequentially.
-Progress is observable ("11 of 20 shares solved") without weakening the
-unsolved shares. This section is not implemented.
+Implemented as `ReleasePolicy::ShardedChallenge` (wire tag 4). The CEK is
+split into `N` Shamir shares over GF(256) with threshold `T`; each share is
+wrapped under an independent sub-solution. A team divides sub-puzzles among
+its members and pools recovered shares; a lone solver grinds them
+sequentially. Progress is observable — `chain challenge check` verifies one
+sub-solution against its shard commitment — without weakening the unsolved
+shards.
+
+```text
+ShardedChallenge {
+    kdfMemoryKib   u32   per-guess Argon2id memory cost, 8 MiB..=1 GiB
+    kdfIterations  u32   per-guess Argon2id passes, 1..=16
+    threshold      u16   1..=shardCount recovered shares reconstruct the CEK
+    shardCount     u16   2..=32
+    shards[]             per shard: salt 16B, commitment 32B,
+                         hint u16-length utf8 <=128B
+    hint           utf8  overall hint, <=1024 bytes
+}
+```
+
+The envelope carries one shard slot per contract shard after the payload
+ciphertext, present exactly when the release is ShardedChallenge and
+committed by the `ProposalId`:
+
+```text
+ChallengeShardSlot {
+    nonce         24B   fresh random XChaCha20-Poly1305 nonce
+    wrappedShare  49B   XChaCha20-Poly1305(share) under the derived
+                        sub-solution key; share = 1B coordinate + 32B data
+}
+```
+
+- `shardKey_i = Argon2id(subSolution_i, salt_i, kdfMemoryKib,
+  kdfIterations, 1 lane)`; the commitment is
+  `BLAKE3-derive("Rebyte Chain challenge shard commitment v1 2026-07-19",
+  shardKey_i)`, so every brute-force check pays full cost.
+- The shard wrap AAD binds the zero-based shard index and the proposal
+  core, so shares cannot be re-indexed or moved between envelopes.
+- Opening requires exactly `threshold` distinct verified sub-solutions.
+- Sharded claims replace the solution-derived proof key with
+  `BLAKE3-derive("Rebyte Chain sharded challenge claim key v1 2026-07-19",
+  CEK)`; a listed recipient judge recovers the CEK through its own audited
+  slot and verifies claims without ever holding the sub-solutions.
 
 ## Winner protocol
 

@@ -1,10 +1,10 @@
-# Rebyte Chain Key Sequence v1 — draft
+# Rebyte Chain Key Sequence v1
 
 Copyright (c) 2026 Pedro Martins (pedro5g)
 
-Status: design draft. No release implements this document yet. Field names,
-domains and limits are not frozen; frozen behavior will be recorded here and
-covered by canonical vectors before any implementing release.
+Status: implemented (`rebyte-contract` release tag 5, `rebyte-chain`
+key-sequence envelope support, `chain capsule create --recipient-sequence`
+and `chain capsule open-sequence`).
 
 ## Concept
 
@@ -37,15 +37,34 @@ with its own generation, backup and revocation lifecycle.
 The envelope publishes an ordered recipe of the required key identities:
 
 ```text
-KeySequenceSlot {
-    holderIdentityIds[]   ordered; committed by the ProposalId
-    layers[]              one HPKE encapsulation per position
-}
+KeySequence { depth u16 }        release tag 5; 2..=8, uniform per capsule
+
+per recipient slot:
+    holder                       outermost public identity (ordinary slot)
+    encappedKey    32B           outermost HPKE encapsulation
+    wrappedKey     48*depth B    nested ciphertext; layer i seals
+                                 (encapped_{i-1} || ct_{i-1}), innermost
+                                 layer seals the 32B CEK
+per slot recipe (after ciphertext, committed by the ProposalId):
+    inner identities             depth-1 full public documents, innermost
+                                 first; the slot holder is the last position
 ```
 
-- The order is part of the Access Contract, so reordering, dropping or
-  substituting a position changes the `ContractId` and `ProposalId` and
-  invalidates approvals.
+Each layer's HPKE info binds the group, proposal nonce, position holder and
+the zero-based position index, so a key cannot be applied at another
+position. The contract recipient entry for one sequence is a composite
+principal: `BLAKE3-derive("Rebyte Chain key sequence principal v1
+2026-07-19", ids innermost..outermost)`. Opened content reports that
+composite principal as its recipient.
+
+Version 1 restrictions: every sequence in one capsule shares the same depth,
+no identity may repeat inside one sequence, outermost identities must be
+distinct across sequences, and sequence capsules protect exact artifacts
+with the standard apply capability set.
+
+- The order is part of the Access Contract through the composite principal,
+  so reordering, dropping or substituting a position changes the
+  `ContractId` and `ProposalId` and invalidates approvals.
 - The recipe is public metadata, consistent with Chain's existing exposure
   of recipient identities. Hiding *which* keys are required is a non-goal.
 - The CLI prints the recipe when the capsule is created and after `inspect`,

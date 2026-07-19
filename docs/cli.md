@@ -377,6 +377,7 @@ it additionally verifies every unanimous formation acceptance.
 rebyte chain capsule create --group GROUP.json --artifact ARTIFACT.rba
   --recipient ALICE.public.json
   [--recipient BOB.public.json ...]
+  [--recipient-sequence "INNER.json,...,OUTER.json" ...]
   [--challenge-solution-file SOLUTION
    [--challenge-memory-kib 65536] [--challenge-iterations 3]
    [--challenge-hint TEXT]]
@@ -413,6 +414,19 @@ HPKE-wraps one Shamir CEK share per witness. `--release-threshold` defaults to
 all witnesses. `--not-before` accepts RFC 3339 with an explicit offset or
 non-negative Unix milliseconds. A finite `--maximum-releases` requires the
 threshold to equal the witness count.
+
+With `--recipient-sequence`, every recipient is an ordered comma-separated
+list of public identities (innermost key first) and the content key is
+wrapped in nested HPKE layers; opening requires every listed private key via
+`chain capsule open-sequence`. All sequences share one depth (2–8), no
+identity may repeat inside a sequence, and outermost identities must be
+distinct across sequences.
+
+Repeating `--challenge-solution-file` creates a sharded challenge: the
+content key splits into one Shamir share per sub-solution and any
+`--challenge-threshold` (default: all) solved shards open the capsule.
+`--challenge-shard-hint` may repeat exactly once per shard, in solution
+order, to publish per-shard pointers.
 
 ### `chain capsule approve`
 
@@ -506,6 +520,22 @@ contract, recipient HPKE, payload AEAD and the inner `.rba` before comparing
 files and explicit directories through the confined read-only diff engine.
 `--path` overrides approved name metadata only for a single-file artifact;
 `--root` selects the destination root for a directory artifact.
+
+### `chain capsule open-sequence`
+
+```text
+rebyte chain capsule open-sequence --file CAPSULE.rbe
+  --key INNER.rbk --key OUTER.rbk
+  [--passphrase-file PATH ...]
+  --output PATH [--raw-artifact] [--json]
+```
+
+Opens a key-sequence capsule with every listed private key, passed in the
+published recipe order (innermost first). Give one `--passphrase-file` to
+reuse it for every key or exactly one per key. A missing or wrong key at any
+position fails closed. The security gain is storage separation: keep each
+sequence key on a different device or location, and pair each with its own
+threshold backup — losing any one key loses access.
 
 ### `chain capsule apply`
 
@@ -612,20 +642,38 @@ the authorized recipient.
 ```text
 rebyte chain challenge solve --file CAPSULE.rbe
   --solution-file SOLUTION --output PATH [--raw-artifact] [--json]
+rebyte chain challenge solve --file CAPSULE.rbe
+  --solution-share INDEX:PATH [--solution-share INDEX:PATH ...]
+  --output PATH [--raw-artifact] [--json]
 ```
 
 Opens a challenge capsule with the exact secret solution bytes; one trailing
-newline in the solution file is ignored. Every attempt costs the full
+newline in each solution file is ignored. Every attempt costs the full
 Argon2id derivation declared by the contract, so brute force pays the
 memory-hard price per guess. A wrong solution fails closed without revealing
-whether it was close. Challenge capsules are created with
-`chain capsule create --challenge-solution-file`; listed recipients keep the
-ordinary `chain capsule open` audit path.
+whether it was close. For a sharded challenge, pass exactly the contract
+threshold of distinct `--solution-share INDEX:PATH` sub-solutions instead.
+Challenge capsules are created with `chain capsule create
+--challenge-solution-file` (repeat the flag to shard, with
+`--challenge-threshold` and per-shard `--challenge-shard-hint`); listed
+recipients keep the ordinary `chain capsule open` audit path.
 
 A challenge is a cost gate, not access control: anyone holding the envelope
 may search, and difficulty adapts to understanding of the published hint,
 never to the number of solvers. Never protect real confidential data with a
 challenge.
+
+### `chain challenge check`
+
+```text
+rebyte chain challenge check --file CAPSULE.rbe
+  --shard INDEX --solution-file SOLUTION [--json]
+```
+
+Verifies one sub-solution of a sharded challenge against its shard
+commitment without opening anything. Each check costs one full Argon2id
+evaluation; a success is durable, shareable team progress and a failure
+reveals nothing beyond one wrong guess.
 
 ### `chain challenge claim`
 
@@ -644,13 +692,15 @@ the solution can verify the embedded proof.
 ```text
 rebyte chain challenge award --file CAPSULE.rbe
   --private-key CREATOR.rbk [--passphrase-file PATH]
-  --claim CLAIM.json --solution-file SOLUTION
+  --claim CLAIM.json [--solution-file SOLUTION]
   --output AWARD.json [--json]
 ```
 
-Verifies the claim proof with the solution, requires the judging identity to
-be a listed capsule recipient, and countersigns the claim as the official
-winner. Exclusivity is human-arbitrated: a published solution opens the
+Verifies the claim proof, requires the judging identity to be a listed
+capsule recipient, and countersigns the claim as the official winner. A
+single-solution challenge needs `--solution-file`; a sharded challenge
+verifies through the judge's own audited slot instead, so the creators never
+need to retain the sub-solutions — omit the flag there. Exclusivity is human-arbitrated: a published solution opens the
 capsule for everyone, so the countersigned claim — not possession of the
 content — is the portable winner certificate.
 
