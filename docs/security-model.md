@@ -42,12 +42,16 @@ candidate only after measuring a net reduction including its manifest cost.
 Chain identity v1 generates independent Ed25519 signing and X25519 HPKE keys.
 The public package self-signs both keys, display name and a random nonce.
 `IdentityId` is a domain-separated BLAKE3 commitment to that proof. The
-passphrase-protected `.rbk` stores both private seeds under Argon2id
-(64 MiB, three iterations, one lane) and XChaCha20-Poly1305. Public identity,
-KDF parameters, salt and nonce are authenticated associated data. Unlocking
-re-derives and compares both public keys. Secret seeds and reconstructed
-Shamir shares remain in zeroizing containers, and debug output for encrypted
-private documents redacts ciphertext and KDF inputs.
+passphrase-protected `.rbk` stores both private seeds under Argon2id and
+XChaCha20-Poly1305. The current v2 scheme uses the RFC 9106 high-memory
+profile (256 MiB, one pass, four lanes); v1 documents (64 MiB, three passes,
+one lane) still unlock and `chain identity rekey` upgrades them in place with
+a fresh salt and nonce. Exactly these two scheme-and-parameter pairs are
+accepted; any other combination is rejected before key derivation. Public
+identity, KDF parameters, salt and nonce are authenticated associated data.
+Unlocking re-derives and compares both public keys. Secret seeds and
+reconstructed Shamir shares remain in zeroizing containers, and debug output
+for encrypted private documents redacts ciphertext and KDF inputs.
 
 Group formation is always unanimous. `GroupId` commits the random group nonce,
 threshold and complete sorted public identity packages. Every member signs the

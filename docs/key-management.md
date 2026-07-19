@@ -23,15 +23,21 @@ distributed broadly, but its Key ID must be authenticated out of band.
 ## Cryptographic format
 
 `rebyte key generate` obtains the 32-byte Ed25519 seed, 16-byte salt and
-24-byte nonce from the operating-system cryptographic random source. Version 1
-private documents use:
+24-byte nonce from the operating-system cryptographic random source. Private
+documents use:
 
-- Argon2id v1.3 with 65,536 KiB, three iterations and one lane;
+- Argon2id v1.3 with the RFC 9106 high-memory profile — 262,144 KiB, one
+  pass, four lanes (scheme `argon2id-xchacha20poly1305-v2`);
 - a 256-bit derived encryption key;
 - XChaCha20-Poly1305 with a unique 192-bit nonce;
 - authenticated associated data covering the document domain, public key,
   Key ID, salt and nonce;
 - canonical unpadded Base64URL for binary JSON fields.
+
+Documents written under the original v1 scheme (65,536 KiB, three passes,
+one lane) still unlock; `rebyte key rekey` re-encrypts one under the current
+profile with a fresh salt and nonce, optionally changing the passphrase.
+Exactly these two scheme-and-parameter pairs are accepted.
 
 The parser rejects unknown fields and future algorithms. A wrong passphrase or
 any authenticated modification produces the same non-secret-bearing error.

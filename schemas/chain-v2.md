@@ -39,7 +39,7 @@ Suite `1` fixes:
 | Quorum CEK sharing | Shamir secret sharing over GF(256), 32-byte secret, 1-byte nonzero share coordinate |
 | Artifact payload | XChaCha20-Poly1305 with a fresh random 256-bit CEK |
 | Fingerprints and commitments | BLAKE3 derive-key mode with distinct contexts |
-| Private identity KDF | Argon2id v1.3, 64 MiB, 3 iterations, 1 lane |
+| Private identity KDF | Argon2id v1.3; current v2 profile 256 MiB, 1 pass, 4 lanes; v1 profile 64 MiB, 3 passes, 1 lane (read and rekey only) |
 | Private identity encryption | XChaCha20-Poly1305 |
 | Text encoding | Base64URL without padding |
 

@@ -111,6 +111,18 @@ rebyte chain group accept officers.proposal.json \
   --output alice.acceptance.json
 ```
 
+While acceptances trickle in, the coordinator can check progress without
+finalizing anything — the report names each pending member and flags any
+document that can never count (wrong group, invalid signature, duplicate):
+
+```console
+rebyte chain ceremony status --group officers.proposal.json \
+  --acceptance alice.acceptance.json
+```
+
+The same command with `--capsule PROPOSAL --approval ...` tracks capsule
+approvals against the group threshold.
+
 Finalize only after receiving one valid acceptance from every proposed member:
 
 ```console
@@ -240,11 +252,22 @@ Before a recipient writes content, run inspect/diff or dry-run and select the
 destination explicitly. Suggested paths are signed or contract-bound metadata,
 not permission to write.
 
+## Audit bundle
+
+`rebyte chain capsule audit --file CAPSULE.rbe --output BUNDLE_DIR` verifies a
+finalized envelope and exports everything a reviewer needs without granting
+access: the full verification report bound to the exact envelope bytes by a
+BLAKE3 hash, the group certificate, approving member IDs, and one reusable
+public identity document with proquint fingerprint per participant. Archive
+one bundle per delivered capsule; content stays encrypted inside it.
+
 ## Rotation, compromise and recovery
 
 Chain envelope v2 has no online revocation service. Rotation creates a new
 identity/group and new envelopes. Existing direct recipients that retained a
-private key can still open historical envelopes.
+private key can still open historical envelopes. A passphrase change is not
+rotation: `chain identity rekey` re-encrypts the same identity locally and
+nothing distributed changes.
 
 On suspected identity or witness compromise:
 

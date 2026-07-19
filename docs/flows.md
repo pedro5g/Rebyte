@@ -72,6 +72,7 @@ stateDiagram-v2
     Lost --> Restored: chain identity restore (any T shares)
     Restored --> BackedUp: issue fresh shares
     Restored --> InUse: same IdentityId, new passphrase
+    InUse --> InUse: chain identity rekey<br/>new passphrase or KDF upgrade
     InUse --> Denied: chain identity status (retired / revoked)
     Denied --> Denied: rejected by group and capsule creation
 ```
@@ -113,11 +114,14 @@ sequenceDiagram
     participant R as Listed recipient
     C->>M: group create → canonical proposal
     M-->>C: group accept (proves own private key)
+    C->>C: ceremony status · who is still pending
     C->>C: group finalize (always unanimous)
     C->>C: capsule create · encrypt once,<br/>HPKE slot per recipient
     C->>M: capsule proposal
     M-->>C: capsule approve (T of N sign exact ProposalId)
+    C->>C: ceremony status · threshold reached?
     C->>C: capsule finalize → .rbe / rbe2_
+    C->>C: capsule audit → verifiable bundle,<br/>content stays encrypted
     C-->>R: envelope by any transport
     R->>R: capsule open / diff / apply<br/>full verification before plaintext
 ```

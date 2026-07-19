@@ -284,6 +284,11 @@ rebyte chain capsule finalize project.proposal.rbep \
   --output project.rbe
 ```
 
+`chain ceremony status --capsule project.proposal.rbep --approval ...` shows
+who is still pending before finalization, and
+`chain capsule audit --file project.rbe --output project-audit` exports a
+verifiable bundle for reviewers without decrypting anything.
+
 An authorized recipient verifies the complete group certificate, threshold,
 HPKE slot, payload authentication and inner `.rba` before reconstruction:
 
@@ -445,7 +450,8 @@ it is rejected unless `--trust-channel development` is present.
 
 `key generate` obtains a 32-byte Ed25519 seed from the operating-system random
 source. The private document encrypts that seed with XChaCha20-Poly1305 using a
-key derived by Argon2id (64 `MiB`, three iterations, one lane). Public identity,
+key derived by Argon2id (256 `MiB`, one pass, four lanes; older 64 `MiB` v1
+files still unlock and `key rekey` upgrades them). Public identity,
 salt and nonce are authenticated as associated data. JSON parsers reject
 unknown fields, non-canonical Base64URL and identity mismatches.
 

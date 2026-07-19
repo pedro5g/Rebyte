@@ -120,6 +120,20 @@ Writes a new document so status changes can be reviewed and deployed without
 silently mutating the original trust record. Status transitions are monotonic:
 a retired or revoked key cannot be made active again.
 
+### `key rekey`
+
+```text
+rebyte key rekey --private-key PRIVATE.json [--passphrase-file PATH]
+  [--new-passphrase-file PATH] --output NEW-PRIVATE.json [--json]
+```
+
+Re-encrypts the private key under the current Argon2id profile with a fresh
+salt and nonce, without changing the key itself: the Key ID and every
+existing signature stay valid. Omit `--new-passphrase-file` to keep the
+current passphrase and only upgrade the KDF cost of an older v1 document.
+The original file is left untouched and still opens with the old passphrase;
+delete it only after verifying the new file unlocks.
+
 ### `pack`
 
 ```text
@@ -288,6 +302,23 @@ coordinator and pass it as `--status-document` on `chain group create` and
 `chain capsule create`, which then reject any denied member, group member,
 recipient or witness.
 
+### `chain identity rekey`
+
+```text
+rebyte chain identity rekey --private-key IDENTITY.rbk
+  [--passphrase-file PATH] [--new-passphrase-file PATH]
+  --output NEW-IDENTITY.rbk [--json]
+```
+
+Re-encrypts the identity under the current Argon2id profile with a fresh salt
+and nonce, without changing the identity itself: the `IdentityId`, public
+package, group memberships and existing capsules all stay valid. Omit
+`--new-passphrase-file` to keep the current passphrase and only upgrade the
+KDF cost of an older v1 document. The original file is left untouched and
+still opens with the old passphrase; delete it only after verifying the new
+file unlocks, and remember that previously issued backup shares still
+reconstruct the identity.
+
 ### `chain group create`
 
 ```text
@@ -424,6 +455,21 @@ the `ContractId`, release policy and capabilities before approving. For a final
 envelope, it additionally verifies the threshold approvals. Inspection never
 decrypts the artifact. Public recipient names and capsule sizes are not
 confidential metadata.
+
+### `chain capsule audit`
+
+```text
+rebyte chain capsule audit --file CAPSULE.rbe --output BUNDLE_DIR [--json]
+rebyte chain capsule audit rbe2_TOKEN --output BUNDLE_DIR [--json]
+```
+
+Fully verifies a finalized envelope and exports a self-contained audit bundle
+directory: `audit.json` (envelope ID, BLAKE3 hash of the exact envelope
+bytes, the complete inspect report, approving member IDs and a proquint
+fingerprint per identity), `group-certificate.json`, and one reusable
+`.public.json` per member and key holder under `identities/`. The bundle
+proves structure, signatures and bindings only — content stays encrypted, so
+it can be archived or handed to a reviewer without granting access.
 
 ### `chain capsule open`
 
@@ -607,6 +653,23 @@ be a listed capsule recipient, and countersigns the claim as the official
 winner. Exclusivity is human-arbitrated: a published solution opens the
 capsule for everyone, so the countersigned claim — not possession of the
 content — is the portable winner certificate.
+
+### `chain ceremony status`
+
+```text
+rebyte chain ceremony status --group GROUP-PROPOSAL.json
+  [--acceptance MEMBER.json ...] [--json]
+rebyte chain ceremony status --capsule CAPSULE.proposal.rbep
+  [--approval MEMBER.json ...] [--json]
+```
+
+Shows a coordinator how far an offline signature collection has progressed
+without finalizing anything: every member with a signed or pending mark, the
+count of distinct valid signatures against the requirement (all members for
+group formation, the group threshold for capsule approval), and whether
+finalization can proceed. Supplied documents that can never count — a wrong
+group, an invalid signature, a duplicate — are listed with the exact file and
+reason instead of failing the whole report.
 
 ## Consumer commands
 

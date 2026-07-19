@@ -9,6 +9,11 @@ byte string chosen by the creators; the "parameter vector" is expressed
 through that string's documented construction and the public hint rather than
 a machine-readable schema.
 
+Frozen vectors (`rebyte-chain/src/vector_tests.rs`) pin the Argon2id solution
+derivation, the commitment construction and one complete finalized challenge
+envelope. A failing vector means stored challenges would stop opening; never
+update an expected value without a version bump and a re-encode plan.
+
 ## Concept
 
 A challenge capsule is an encrypted envelope whose content key is released by

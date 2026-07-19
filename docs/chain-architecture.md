@@ -119,9 +119,11 @@ keys is represented by an access policy.
 
 An `.rbk` key bundle is a canonical, versioned document containing public
 identity data and encrypted private seed material. Argon2id v1.3 derives the
-XChaCha20-Poly1305 key directly from the passphrase and a random salt. Version
-1 fixes 64 MiB, three iterations and one lane. Parameters, salt, nonce and the
-complete public identity are authenticated as associated data.
+XChaCha20-Poly1305 key directly from the passphrase and a random salt. The
+current v2 scheme fixes the RFC 9106 high-memory profile of 256 MiB, one pass
+and four lanes; v1 documents (64 MiB, three passes, one lane) remain readable
+and `chain identity rekey` upgrades them in place. Parameters, salt, nonce and
+the complete public identity are authenticated as associated data.
 
 Unlock validates public/private correspondence, canonical encoding,
 algorithms, limits and KDF parameters before returning an in-memory identity.
