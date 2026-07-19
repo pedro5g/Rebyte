@@ -20,7 +20,8 @@ use crate::codec::{decode_array, domain_hash, encode_base64, put_bytes_u16, put_
 const DOCUMENT_VERSION: u16 = 1;
 const PUBLIC_KIND: &str = "rebyte-chain-identity-public";
 const PRIVATE_KIND: &str = "rebyte-chain-identity-private";
-const PRIVATE_ENCRYPTION: &str = "argon2id-xchacha20poly1305-v1";
+const PRIVATE_ENCRYPTION: &str = "argon2id-xchacha20poly1305-v2";
+const PRIVATE_ENCRYPTION_V1: &str = "argon2id-xchacha20poly1305-v1";
 const SIGNATURE_DOMAIN: &[u8] = b"rebyte chain identity proof v1\0";
 const PRIVATE_AAD_DOMAIN: &[u8] = b"rebyte chain private identity v1\0";
 const MIN_PASSPHRASE_BYTES: usize = 12;
@@ -31,9 +32,28 @@ const NONCE_BYTES: usize = 24;
 const SEED_BYTES: usize = 32;
 const SECRET_PLAINTEXT_BYTES: usize = SEED_BYTES * 2;
 const TAG_BYTES: usize = 16;
-const KDF_MEMORY_KIB: u32 = 65_536;
-const KDF_ITERATIONS: u32 = 3;
-const KDF_LANES: u32 = 1;
+// RFC 9106 high-memory profile: one pass over 256 MiB across four lanes.
+// The argon2 crate computes lanes sequentially today, so unlock latency is
+// bounded by memory passes, not lanes; a parallel implementation may later
+// cut wall-clock time without a format change.
+const KDF_COST: KdfCost = KdfCost {
+    memory_kib: 262_144,
+    iterations: 1,
+    lanes: 4,
+};
+// v1 documents froze the original 64 MiB, three-pass, single-lane profile.
+const KDF_COST_V1: KdfCost = KdfCost {
+    memory_kib: 65_536,
+    iterations: 3,
+    lanes: 1,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct KdfCost {
+    memory_kib: u32,
+    iterations: u32,
+    lanes: u32,
+}
 
 pub(crate) type ChainKem = X25519HkdfSha256;
 pub(crate) type HpkePrivateKey = <ChainKem as hpke::Kem>::PrivateKey;
@@ -272,7 +292,7 @@ impl EncryptedIdentityDocument {
         let nonce = decode_array(&self.nonce)?;
         let encrypted =
             decode_array::<{ SECRET_PLAINTEXT_BYTES + TAG_BYTES }>(&self.encrypted_secrets)?;
-        let key = derive_encryption_key(passphrase, &salt)?;
+        let key = derive_encryption_key(passphrase, &salt, self.kdf_cost())?;
         let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
             .map_err(|_| ChainError::CryptographicFailure)?;
         let plaintext = Zeroizing::new(
@@ -281,7 +301,7 @@ impl EncryptedIdentityDocument {
                     &XNonce::from(nonce),
                     Payload {
                         msg: &encrypted,
-                        aad: &private_aad(&self.public_identity, &salt, &nonce)?,
+                        aad: &private_aad(&self.public_identity, &salt, &nonce, self.kdf_cost())?,
                     },
                 )
                 .map_err(|_| ChainError::AuthenticationFailed)?,
@@ -299,13 +319,29 @@ impl EncryptedIdentityDocument {
         unlocked_from_seeds(&signing_seed, encryption_ikm, self.public_identity.clone())
     }
 
+    /// Returns the exact passphrase-encryption scheme label of this document.
+    #[must_use]
+    pub fn encryption_scheme(&self) -> &str {
+        &self.encryption
+    }
+
+    const fn kdf_cost(&self) -> KdfCost {
+        KdfCost {
+            memory_kib: self.kdf_memory_kib,
+            iterations: self.kdf_iterations,
+            lanes: self.kdf_lanes,
+        }
+    }
+
     fn validate(&self) -> Result<(), ChainError> {
+        let supported_profile = match self.encryption.as_str() {
+            PRIVATE_ENCRYPTION => self.kdf_cost() == KDF_COST,
+            PRIVATE_ENCRYPTION_V1 => self.kdf_cost() == KDF_COST_V1,
+            _ => false,
+        };
         if self.schema_version != DOCUMENT_VERSION
             || self.kind != PRIVATE_KIND
-            || self.encryption != PRIVATE_ENCRYPTION
-            || self.kdf_memory_kib != KDF_MEMORY_KIB
-            || self.kdf_iterations != KDF_ITERATIONS
-            || self.kdf_lanes != KDF_LANES
+            || !supported_profile
         {
             return Err(ChainError::UnsupportedDocument);
         }
@@ -479,6 +515,29 @@ fn encrypt_identity_with_material(
     salt: [u8; SALT_BYTES],
     nonce: [u8; NONCE_BYTES],
 ) -> Result<EncryptedIdentityDocument, ChainError> {
+    encrypt_identity_at(
+        public,
+        signing_seed,
+        encryption_ikm,
+        passphrase,
+        salt,
+        nonce,
+        PRIVATE_ENCRYPTION,
+        KDF_COST,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // One internal seam serves both KDF profiles.
+fn encrypt_identity_at(
+    public: IdentityPublicDocument,
+    signing_seed: &Zeroizing<[u8; SEED_BYTES]>,
+    encryption_ikm: &Zeroizing<[u8; SEED_BYTES]>,
+    passphrase: &[u8],
+    salt: [u8; SALT_BYTES],
+    nonce: [u8; NONCE_BYTES],
+    scheme: &str,
+    cost: KdfCost,
+) -> Result<EncryptedIdentityDocument, ChainError> {
     validate_passphrase(passphrase)?;
     let mut secrets = Zeroizing::new([0_u8; SECRET_PLAINTEXT_BYTES]);
     secrets
@@ -489,7 +548,7 @@ fn encrypt_identity_with_material(
         .get_mut(SEED_BYTES..)
         .ok_or(ChainError::LengthOverflow)?
         .copy_from_slice(encryption_ikm.as_ref());
-    let key = derive_encryption_key(passphrase, &salt)?;
+    let key = derive_encryption_key(passphrase, &salt, cost)?;
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
         .map_err(|_| ChainError::CryptographicFailure)?;
     let encrypted = cipher
@@ -497,17 +556,17 @@ fn encrypt_identity_with_material(
             &XNonce::from(nonce),
             Payload {
                 msg: secrets.as_ref(),
-                aad: &private_aad(&public, &salt, &nonce)?,
+                aad: &private_aad(&public, &salt, &nonce, cost)?,
             },
         )
         .map_err(|_| ChainError::EncryptionFailed)?;
     let private = EncryptedIdentityDocument {
         schema_version: DOCUMENT_VERSION,
         kind: PRIVATE_KIND.to_string(),
-        encryption: PRIVATE_ENCRYPTION.to_string(),
-        kdf_memory_kib: KDF_MEMORY_KIB,
-        kdf_iterations: KDF_ITERATIONS,
-        kdf_lanes: KDF_LANES,
+        encryption: scheme.to_string(),
+        kdf_memory_kib: cost.memory_kib,
+        kdf_iterations: cost.iterations,
+        kdf_lanes: cost.lanes,
         public_identity: public,
         salt: encode_base64(&salt),
         nonce: encode_base64(&nonce),
@@ -515,6 +574,30 @@ fn encrypt_identity_with_material(
     };
     private.validate()?;
     Ok(private)
+}
+
+/// Re-encrypts an identity under a new passphrase and the current KDF cost.
+///
+/// The identity itself never changes: the same seeds are wrapped again with
+/// a fresh salt and nonce, upgrading any v1 document to the current
+/// Argon2id profile. Pass the same passphrase twice to upgrade in place.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] for a wrong current passphrase, a weak new
+/// passphrase or an invalid document.
+pub fn rekey_identity(
+    document: &EncryptedIdentityDocument,
+    passphrase: &[u8],
+    new_passphrase: &[u8],
+) -> Result<EncryptedIdentityDocument, ChainError> {
+    let unlocked = document.unlock(passphrase)?;
+    reencrypt_identity(
+        unlocked.public_identity().clone(),
+        &unlocked.signing_seed(),
+        unlocked.encryption_ikm(),
+        new_passphrase,
+    )
 }
 
 pub(crate) fn unlocked_from_seeds(
@@ -569,6 +652,7 @@ fn private_aad(
     public: &IdentityPublicDocument,
     salt: &[u8; SALT_BYTES],
     nonce: &[u8; NONCE_BYTES],
+    cost: KdfCost,
 ) -> Result<Vec<u8>, ChainError> {
     let public_bytes = public.canonical_member_bytes()?;
     let mut aad = Vec::with_capacity(
@@ -580,9 +664,9 @@ fn private_aad(
             .saturating_add(12),
     );
     aad.extend_from_slice(PRIVATE_AAD_DOMAIN);
-    put_u32(&mut aad, KDF_MEMORY_KIB);
-    put_u32(&mut aad, KDF_ITERATIONS);
-    put_u32(&mut aad, KDF_LANES);
+    put_u32(&mut aad, cost.memory_kib);
+    put_u32(&mut aad, cost.iterations);
+    put_u32(&mut aad, cost.lanes);
     aad.extend_from_slice(&public_bytes);
     aad.extend_from_slice(salt);
     aad.extend_from_slice(nonce);
@@ -592,9 +676,15 @@ fn private_aad(
 fn derive_encryption_key(
     passphrase: &[u8],
     salt: &[u8; SALT_BYTES],
+    cost: KdfCost,
 ) -> Result<Zeroizing<[u8; 32]>, ChainError> {
-    let params = Params::new(KDF_MEMORY_KIB, KDF_ITERATIONS, KDF_LANES, Some(SEED_BYTES))
-        .map_err(|_| ChainError::KeyDerivation)?;
+    let params = Params::new(
+        cost.memory_kib,
+        cost.iterations,
+        cost.lanes,
+        Some(SEED_BYTES),
+    )
+    .map_err(|_| ChainError::KeyDerivation)?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = Zeroizing::new([0_u8; SEED_BYTES]);
     argon2
@@ -641,7 +731,12 @@ pub(crate) fn deterministic_identity(
 
 #[cfg(test)]
 mod tests {
-    use super::deterministic_identity;
+    use super::{
+        EncryptedIdentityDocument, KDF_COST, KDF_COST_V1, PRIVATE_ENCRYPTION,
+        PRIVATE_ENCRYPTION_V1, deterministic_identity, encrypt_identity_at, rekey_identity,
+    };
+
+    const TEST_PASSPHRASE: &[u8] = b"test-only-passphrase";
 
     #[test]
     fn encrypted_identity_debug_is_redacted() -> Result<(), Box<dyn std::error::Error>> {
@@ -650,6 +745,54 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains(&private.encrypted_secrets));
         assert!(!debug.contains(&private.salt));
+        Ok(())
+    }
+
+    fn legacy_v1_document(
+        seed: u8,
+        name: &str,
+    ) -> Result<EncryptedIdentityDocument, Box<dyn std::error::Error>> {
+        let (private, public) = deterministic_identity(seed, name)?;
+        let unlocked = private.unlock(TEST_PASSPHRASE)?;
+        Ok(encrypt_identity_at(
+            public,
+            &unlocked.signing_seed(),
+            unlocked.encryption_ikm(),
+            TEST_PASSPHRASE,
+            [0x24; super::SALT_BYTES],
+            [0x42; super::NONCE_BYTES],
+            PRIVATE_ENCRYPTION_V1,
+            KDF_COST_V1,
+        )?)
+    }
+
+    #[test]
+    fn v1_documents_still_unlock_and_rekey_to_v2() -> Result<(), Box<dyn std::error::Error>> {
+        let legacy = legacy_v1_document(0x43, "Legacy holder")?;
+        assert_eq!(legacy.encryption_scheme(), PRIVATE_ENCRYPTION_V1);
+        let legacy = EncryptedIdentityDocument::from_json(&legacy.to_json()?)?;
+        let unlocked = legacy.unlock(TEST_PASSPHRASE)?;
+        let expected_id = unlocked.identity_id();
+
+        let upgraded = rekey_identity(&legacy, TEST_PASSPHRASE, b"stronger passphrase")?;
+        assert_eq!(upgraded.encryption_scheme(), PRIVATE_ENCRYPTION);
+        assert_eq!(upgraded.kdf_cost(), KDF_COST);
+        assert!(upgraded.unlock(TEST_PASSPHRASE).is_err());
+        assert_eq!(
+            upgraded.unlock(b"stronger passphrase")?.identity_id(),
+            expected_id
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mismatched_scheme_and_cost_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let legacy = legacy_v1_document(0x44, "Mismatch")?;
+        let mut mutated: serde_json::Value = serde_json::from_slice(&legacy.to_json()?)?;
+        mutated["encryption"] = serde_json::json!(PRIVATE_ENCRYPTION);
+        let mut bytes = serde_json::to_vec_pretty(&mutated)?;
+        bytes.push(b'\n');
+        assert!(EncryptedIdentityDocument::from_json(&bytes).is_err());
         Ok(())
     }
 }

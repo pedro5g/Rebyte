@@ -54,7 +54,7 @@ pub use group::{
 };
 pub use identity::{
     EncryptedIdentityDocument, IdentityId, IdentityPublicDocument, UnlockedIdentity,
-    generate_identity,
+    generate_identity, rekey_identity,
 };
 pub use rebyte_contract::{
     AccessContract, AccessContractBuilder, Capabilities, Capability, ChallengeRelease,

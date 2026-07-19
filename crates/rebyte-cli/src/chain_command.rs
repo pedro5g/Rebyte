@@ -22,7 +22,8 @@ use rebyte_chain::{
     create_quorum_semantic_patch_proposal, create_release_request, create_semantic_patch_proposal,
     deny_statused_identities, finalize_capsule, finalize_group, generate_identity, grant_release,
     group_ceremony_status, issue_identity_status, open_capsule, open_challenge_content,
-    open_quorum_content, open_semantic_patch, restore_identity, verify_challenge_claim,
+    open_quorum_content, open_semantic_patch, rekey_identity, restore_identity,
+    verify_challenge_claim,
 };
 use rebyte_core::{
     ApplyOptions, ApplyReport, ArtifactEntryKind, ArtifactKind, DiffReport, DirectoryChangeKind,
@@ -32,7 +33,7 @@ use rebyte_core::{
 use rebyte_format::{ContentKind as FileContentKind, Digest32, RelativeArtifactPath};
 use serde::Serialize;
 
-use super::keys::{PassphraseArgs, ensure_output_absent, read_passphrase};
+use super::keys::{PassphraseArgs, ensure_output_absent, read_passphrase, read_passphrase_file};
 use super::security_io::{read_bounded_nofollow, read_private_bounded_nofollow, write_new};
 use super::{
     CliError, EXIT_DIGEST, EXIT_GENERIC, EXIT_INVALID_SIGNATURE, EXIT_MALFORMED, EXIT_POLICY,
@@ -192,6 +193,26 @@ enum IdentitySubcommand {
     Restore(IdentityRestoreCommand),
     /// Issue a signed retired or revoked statement for this identity.
     Status(IdentityStatusCommand),
+    /// Re-encrypt the identity under a new passphrase and KDF cost.
+    Rekey(IdentityRekeyCommand),
+}
+
+#[derive(Debug, Args)]
+struct IdentityRekeyCommand {
+    /// Passphrase-protected private `.rbk` to re-encrypt.
+    #[arg(long, value_name = "PATH")]
+    private_key: PathBuf,
+    #[command(flatten)]
+    passphrase: PassphraseArgs,
+    /// Read the new passphrase from a mode-0600 file; omit to keep the current one.
+    #[arg(long, value_name = "PATH")]
+    new_passphrase_file: Option<PathBuf>,
+    /// Re-encrypted private `.rbk` output.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -962,6 +983,17 @@ struct ChallengeClaimReport {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct IdentityRekeyReport {
+    schema_version: u16,
+    identity_id: String,
+    fingerprint: String,
+    previous_scheme: String,
+    scheme: String,
+    output: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CapsuleAuditReport {
     schema_version: u16,
     envelope_id: String,
@@ -1062,6 +1094,63 @@ fn run_identity(command: &IdentityCommand) -> Result<(), CliError> {
         IdentitySubcommand::Backup(command) => backup_identity_command(command),
         IdentitySubcommand::Restore(command) => restore_identity_command(command),
         IdentitySubcommand::Status(command) => status_identity_command(command),
+        IdentitySubcommand::Rekey(command) => rekey_identity_command(command),
+    }
+}
+
+fn rekey_identity_command(command: &IdentityRekeyCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let bytes = read_private_bounded_nofollow(&command.private_key, MAX_IDENTITY_DOCUMENT_BYTES)
+        .map_err(|error| {
+            CliError::new(
+                EXIT_POLICY,
+                format!(
+                    "cannot safely read Chain private identity {}: {error}",
+                    command.private_key.display()
+                ),
+            )
+        })?;
+    let document = EncryptedIdentityDocument::from_json(&bytes).map_err(chain_error)?;
+    let passphrase = read_passphrase(&command.passphrase, false)?;
+    let new_passphrase = match &command.new_passphrase_file {
+        Some(path) => read_passphrase_file(path)?,
+        None => passphrase.clone(),
+    };
+    let previous_scheme = document.encryption_scheme().to_string();
+    let rekeyed = rekey_identity(&document, passphrase.as_bytes(), new_passphrase.as_bytes())
+        .map_err(chain_error)?;
+    write_new(
+        &command.output,
+        &rekeyed.to_json().map_err(chain_error)?,
+        true,
+    )
+    .map_err(|error| output_error("re-encrypted identity", &command.output, &error))?;
+    let identity_id = rekeyed
+        .public_identity()
+        .identity_id()
+        .map_err(chain_error)?;
+    let report = IdentityRekeyReport {
+        schema_version: 1,
+        identity_id: identity_id.to_base64(),
+        fingerprint: super::fingerprint::proquints(identity_id.as_bytes()),
+        previous_scheme,
+        scheme: rekeyed.encryption_scheme().to_string(),
+        output: command.output.display().to_string(),
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::success("✓ Chain identity re-encrypted"));
+        println!("  Identity ID  {}", report.identity_id);
+        println!(
+            "  Scheme       {} → {}",
+            report.previous_scheme, report.scheme
+        );
+        println!("  Output       {}", report.output);
+        println!(
+            "\nThe original file still opens with the old passphrase.\nDelete it only after verifying the new file unlocks."
+        );
+        Ok(())
     }
 }
 

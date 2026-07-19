@@ -21,7 +21,7 @@ mod key_file;
 
 pub use key_file::{
     EncryptedPrivateKeyDocument, KeyDocumentError, LocalKeySigner, PublicKeyDocument,
-    generate_encrypted_key,
+    generate_encrypted_key, rekey_encrypted_key,
 };
 
 const SECRET_BYTES: usize = 32;

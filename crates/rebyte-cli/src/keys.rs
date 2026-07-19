@@ -11,6 +11,7 @@ use rebyte_format::KeyId;
 use rebyte_signature::{KeyStatus, TrustChannel, TrustedPublicKey};
 use rebyte_signer::{
     EncryptedPrivateKeyDocument, LocalKeySigner, PublicKeyDocument, generate_encrypted_key,
+    rekey_encrypted_key,
 };
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -35,6 +36,26 @@ enum KeySubcommand {
     Inspect(InspectCommand),
     /// Create a new trust document with an updated local key status.
     Status(StatusCommand),
+    /// Re-encrypt the private key under a new passphrase and KDF cost.
+    Rekey(RekeyCommand),
+}
+
+#[derive(Debug, Args)]
+struct RekeyCommand {
+    /// Encrypted private-key document to re-encrypt.
+    #[arg(long, value_name = "PATH")]
+    private_key: PathBuf,
+    #[command(flatten)]
+    passphrase: PassphraseArgs,
+    /// Read the new passphrase from a mode-0600 file; omit to keep the current one.
+    #[arg(long, value_name = "PATH")]
+    new_passphrase_file: Option<PathBuf>,
+    /// Re-encrypted private-key output; created with mode 0600 on Unix.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
+    /// Emit stable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -126,6 +147,70 @@ pub(super) fn run(command: &KeyCommand) -> Result<(), CliError> {
         KeySubcommand::Generate(command) => generate(command),
         KeySubcommand::Inspect(command) => inspect(command),
         KeySubcommand::Status(command) => status(command),
+        KeySubcommand::Rekey(command) => rekey(command),
+    }
+}
+
+fn rekey(command: &RekeyCommand) -> Result<(), CliError> {
+    ensure_output_absent(&command.output)?;
+    let bytes = read_private_bounded_nofollow(&command.private_key, MAX_KEY_DOCUMENT_BYTES)
+        .map_err(|error| {
+            CliError::new(
+                EXIT_POLICY,
+                format!(
+                    "cannot safely read private key {}: {error}",
+                    command.private_key.display()
+                ),
+            )
+        })?;
+    let document = EncryptedPrivateKeyDocument::from_json(&bytes).map_err(|error| {
+        CliError::new(
+            EXIT_POLICY,
+            format!("invalid private key document: {error}"),
+        )
+    })?;
+    let passphrase = read_passphrase(&command.passphrase, false)?;
+    let new_passphrase = match &command.new_passphrase_file {
+        Some(path) => read_passphrase_file(path)?,
+        None => passphrase.clone(),
+    };
+    let previous_scheme = document.encryption_scheme().to_string();
+    let rekeyed = rekey_encrypted_key(&document, passphrase.as_bytes(), new_passphrase.as_bytes())
+        .map_err(|error| CliError::new(EXIT_POLICY, error.to_string()))?;
+    let json = rekeyed
+        .to_json()
+        .map_err(|error| CliError::new(EXIT_POLICY, error.to_string()))?;
+    write_new(&command.output, &json, true).map_err(|error| {
+        CliError::new(
+            EXIT_GENERIC,
+            format!(
+                "cannot create private key {}: {error}",
+                command.output.display()
+            ),
+        )
+    })?;
+    let report = KeyRekeyReport {
+        schema_version: 1,
+        key_id: encode_key_id(
+            &rekeyed
+                .key_id()
+                .map_err(|error| CliError::new(EXIT_POLICY, error.to_string()))?,
+        ),
+        previous_scheme,
+        scheme: rekeyed.encryption_scheme().to_string(),
+        output: command.output.display().to_string(),
+    };
+    if command.json {
+        write_json(&report)
+    } else {
+        println!("{}", super::ui::success("✓ Private key re-encrypted"));
+        println!("  Key ID   {}", report.key_id);
+        println!("  Scheme   {} → {}", report.previous_scheme, report.scheme);
+        println!("  Output   {}", report.output);
+        println!(
+            "\nThe original file still opens with the old passphrase.\nDelete it only after verifying the new file unlocks."
+        );
+        Ok(())
     }
 }
 
@@ -306,31 +391,35 @@ fn read_public_document(path: &Path) -> Result<PublicKeyDocument, CliError> {
         .map_err(|error| CliError::new(EXIT_POLICY, error.to_string()))
 }
 
+pub(super) fn read_passphrase_file(path: &Path) -> Result<Zeroizing<String>, CliError> {
+    let bytes = Zeroizing::new(
+        read_private_bounded_nofollow(path, MAX_PASSPHRASE_FILE_BYTES).map_err(|error| {
+            CliError::new(
+                EXIT_POLICY,
+                format!(
+                    "cannot safely read passphrase file {}: {error}",
+                    path.display()
+                ),
+            )
+        })?,
+    );
+    let mut value = core::str::from_utf8(&bytes)
+        .map_err(|_| CliError::new(EXIT_POLICY, "passphrase file is not UTF-8"))?
+        .to_owned();
+    if value.ends_with("\r\n") {
+        value.truncate(value.len().saturating_sub(2));
+    } else if value.ends_with('\n') {
+        value.truncate(value.len().saturating_sub(1));
+    }
+    Ok(Zeroizing::new(value))
+}
+
 pub(super) fn read_passphrase(
     args: &PassphraseArgs,
     confirm: bool,
 ) -> Result<Zeroizing<String>, CliError> {
     if let Some(path) = &args.passphrase_file {
-        let bytes = Zeroizing::new(
-            read_private_bounded_nofollow(path, MAX_PASSPHRASE_FILE_BYTES).map_err(|error| {
-                CliError::new(
-                    EXIT_POLICY,
-                    format!(
-                        "cannot safely read passphrase file {}: {error}",
-                        path.display()
-                    ),
-                )
-            })?,
-        );
-        let mut value = core::str::from_utf8(&bytes)
-            .map_err(|_| CliError::new(EXIT_POLICY, "passphrase file is not UTF-8"))?
-            .to_owned();
-        if value.ends_with("\r\n") {
-            value.truncate(value.len().saturating_sub(2));
-        } else if value.ends_with('\n') {
-            value.truncate(value.len().saturating_sub(1));
-        }
-        return Ok(Zeroizing::new(value));
+        return read_passphrase_file(path);
     }
     let first = Zeroizing::new(
         rpassword::prompt_password("Private-key passphrase: ").map_err(|error| {
@@ -360,6 +449,16 @@ pub(super) fn ensure_output_absent(path: &Path) -> Result<(), CliError> {
             format!("cannot inspect output {}: {error}", path.display()),
         )),
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyRekeyReport {
+    schema_version: u16,
+    key_id: String,
+    previous_scheme: String,
+    scheme: String,
+    output: String,
 }
 
 #[derive(Serialize)]

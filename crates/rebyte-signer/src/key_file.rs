@@ -20,7 +20,8 @@ use zeroize::Zeroizing;
 const DOCUMENT_VERSION: u16 = 1;
 const PRIVATE_KIND: &str = "rebyte-ed25519-private-key";
 const PUBLIC_KIND: &str = "rebyte-ed25519-public-key";
-const ENCRYPTION: &str = "argon2id-xchacha20poly1305-v1";
+const ENCRYPTION: &str = "argon2id-xchacha20poly1305-v2";
+const ENCRYPTION_V1: &str = "argon2id-xchacha20poly1305-v1";
 const AAD_DOMAIN: &[u8] = b"rebyte:local-key:v1\0";
 const SECRET_BYTES: usize = 32;
 const SALT_BYTES: usize = 16;
@@ -28,9 +29,27 @@ const NONCE_BYTES: usize = 24;
 const TAG_BYTES: usize = 16;
 const MIN_PASSPHRASE_BYTES: usize = 12;
 const MAX_PASSPHRASE_BYTES: usize = 1_024;
-const KDF_MEMORY_KIB: u32 = 65_536;
-const KDF_ITERATIONS: u32 = 3;
-const KDF_LANES: u32 = 1;
+// RFC 9106 high-memory profile: one pass over 256 MiB across four lanes.
+// Lanes are computed sequentially by the argon2 crate today; a parallel
+// implementation may later cut wall-clock time without a format change.
+const KDF_COST: KdfCost = KdfCost {
+    memory_kib: 262_144,
+    iterations: 1,
+    lanes: 4,
+};
+// v1 documents froze the original 64 MiB, three-pass, single-lane profile.
+const KDF_COST_V1: KdfCost = KdfCost {
+    memory_kib: 65_536,
+    iterations: 3,
+    lanes: 1,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct KdfCost {
+    memory_kib: u32,
+    iterations: u32,
+    lanes: u32,
+}
 
 /// JSON document containing an encrypted Ed25519 seed and its public identity.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -94,7 +113,7 @@ impl EncryptedPrivateKeyDocument {
     pub fn unlock(&self, passphrase: &[u8]) -> Result<LocalKeySigner, KeyDocumentError> {
         validate_passphrase(passphrase)?;
         let fields = self.decode_fields()?;
-        let key = derive_encryption_key(passphrase, &fields.salt)?;
+        let key = derive_encryption_key(passphrase, &fields.salt, self.kdf_cost()?)?;
         let cipher = XChaCha20Poly1305::new(&Key::from(*key));
         let plaintext = Zeroizing::new(
             cipher
@@ -135,13 +154,25 @@ impl EncryptedPrivateKeyDocument {
         self.decode_fields().map(|fields| fields.key_id)
     }
 
+    /// Returns the exact passphrase-encryption scheme label of this document.
+    #[must_use]
+    pub fn encryption_scheme(&self) -> &str {
+        &self.encryption
+    }
+
+    fn kdf_cost(&self) -> Result<KdfCost, KeyDocumentError> {
+        match self.encryption.as_str() {
+            ENCRYPTION => Ok(KDF_COST),
+            ENCRYPTION_V1 => Ok(KDF_COST_V1),
+            _ => Err(KeyDocumentError::UnsupportedDocument),
+        }
+    }
+
     fn validate(&self) -> Result<(), KeyDocumentError> {
-        if self.schema_version != DOCUMENT_VERSION
-            || self.kind != PRIVATE_KIND
-            || self.encryption != ENCRYPTION
-        {
+        if self.schema_version != DOCUMENT_VERSION || self.kind != PRIVATE_KIND {
             return Err(KeyDocumentError::UnsupportedDocument);
         }
+        self.kdf_cost()?;
         let fields = self.decode_fields()?;
         if key_id(&fields.public_key) != fields.key_id
             || fields.encrypted_seed.len() != SECRET_BYTES + TAG_BYTES
@@ -480,10 +511,33 @@ fn encrypt_seed(
     display_name: &str,
     channel: TrustChannel,
 ) -> Result<(EncryptedPrivateKeyDocument, PublicKeyDocument), KeyDocumentError> {
+    let private = encrypt_private_seed(seed, passphrase, salt, nonce)?;
+    let public_key = decode_array(&private.public_key)?;
+    let public = PublicKeyDocument::new(display_name, public_key, channel)?;
+    Ok((private, public))
+}
+
+fn encrypt_private_seed(
+    seed: &[u8; SECRET_BYTES],
+    passphrase: &[u8],
+    salt: [u8; SALT_BYTES],
+    nonce: [u8; NONCE_BYTES],
+) -> Result<EncryptedPrivateKeyDocument, KeyDocumentError> {
+    encrypt_private_seed_at(seed, passphrase, salt, nonce, ENCRYPTION, KDF_COST)
+}
+
+fn encrypt_private_seed_at(
+    seed: &[u8; SECRET_BYTES],
+    passphrase: &[u8],
+    salt: [u8; SALT_BYTES],
+    nonce: [u8; NONCE_BYTES],
+    scheme: &str,
+    cost: KdfCost,
+) -> Result<EncryptedPrivateKeyDocument, KeyDocumentError> {
     let signing_key = SigningKey::from_bytes(seed);
     let public_key = signing_key.verifying_key().to_bytes();
     let fingerprint = key_id(&public_key);
-    let key = derive_encryption_key(passphrase, &salt)?;
+    let key = derive_encryption_key(passphrase, &salt, cost)?;
     let cipher = XChaCha20Poly1305::new(&Key::from(*key));
     let encrypted_seed = cipher
         .encrypt(
@@ -494,28 +548,53 @@ fn encrypt_seed(
             },
         )
         .map_err(|_| KeyDocumentError::EncryptionFailed)?;
-    let private = EncryptedPrivateKeyDocument {
+    Ok(EncryptedPrivateKeyDocument {
         schema_version: DOCUMENT_VERSION,
         kind: PRIVATE_KIND.to_string(),
-        encryption: ENCRYPTION.to_string(),
+        encryption: scheme.to_string(),
         public_key: encode(&public_key),
         key_id: encode(fingerprint.as_bytes()),
         salt: encode(&salt),
         nonce: encode(&nonce),
         encrypted_seed: encode(&encrypted_seed),
-    };
-    let public = PublicKeyDocument::new(display_name, public_key, channel)?;
-    Ok((private, public))
+    })
+}
+
+/// Re-encrypts a private key under a new passphrase and the current KDF cost.
+///
+/// The key itself never changes: the same seed is wrapped again with a fresh
+/// salt and nonce, upgrading any v1 document to the current Argon2id
+/// profile. Pass the same passphrase twice to upgrade in place.
+///
+/// # Errors
+///
+/// Returns [`KeyDocumentError`] for a wrong current passphrase, a weak new
+/// passphrase, unavailable entropy or a failed encryption.
+pub fn rekey_encrypted_key(
+    document: &EncryptedPrivateKeyDocument,
+    passphrase: &[u8],
+    new_passphrase: &[u8],
+) -> Result<EncryptedPrivateKeyDocument, KeyDocumentError> {
+    document.validate()?;
+    validate_passphrase(new_passphrase)?;
+    let signer = document.unlock(passphrase)?;
+    let seed = Zeroizing::new(signer.key.to_bytes());
+    let mut salt = [0_u8; SALT_BYTES];
+    let mut nonce = [0_u8; NONCE_BYTES];
+    getrandom::fill(&mut salt).map_err(|_| KeyDocumentError::EntropyUnavailable)?;
+    getrandom::fill(&mut nonce).map_err(|_| KeyDocumentError::EntropyUnavailable)?;
+    encrypt_private_seed(&seed, new_passphrase, salt, nonce)
 }
 
 fn derive_encryption_key(
     passphrase: &[u8],
     salt: &[u8; SALT_BYTES],
+    cost: KdfCost,
 ) -> Result<Zeroizing<[u8; 32]>, KeyDocumentError> {
     let params = Params::new(
-        KDF_MEMORY_KIB,
-        KDF_ITERATIONS,
-        KDF_LANES,
+        cost.memory_kib,
+        cost.iterations,
+        cost.lanes,
         Some(SECRET_BYTES),
     )
     .map_err(|_| KeyDocumentError::KeyDerivation)?;
@@ -588,9 +667,37 @@ fn decode_array<const N: usize>(value: &str) -> Result<[u8; N], KeyDocumentError
 mod tests {
     use rebyte_signature::{KeyStatus, Signer, TrustChannel};
 
-    use super::{EncryptedPrivateKeyDocument, KeyDocumentError, PublicKeyDocument, encrypt_seed};
+    use super::{
+        ENCRYPTION, ENCRYPTION_V1, EncryptedPrivateKeyDocument, KDF_COST_V1, KeyDocumentError,
+        PublicKeyDocument, encrypt_private_seed_at, encrypt_seed, rekey_encrypted_key,
+    };
 
     const PASSPHRASE: &[u8] = b"correct horse battery staple";
+
+    #[test]
+    fn v1_documents_still_unlock_and_rekey_to_v2() -> Result<(), Box<dyn std::error::Error>> {
+        let legacy = encrypt_private_seed_at(
+            &[0x42; 32],
+            PASSPHRASE,
+            [0x11; 16],
+            [0x22; 24],
+            ENCRYPTION_V1,
+            KDF_COST_V1,
+        )?;
+        assert_eq!(legacy.encryption_scheme(), ENCRYPTION_V1);
+        let legacy = EncryptedPrivateKeyDocument::from_json(&legacy.to_json()?)?;
+        let signer = legacy.unlock(PASSPHRASE)?;
+
+        let upgraded = rekey_encrypted_key(&legacy, PASSPHRASE, b"an even longer passphrase")?;
+        assert_eq!(upgraded.encryption_scheme(), ENCRYPTION);
+        assert!(upgraded.unlock(PASSPHRASE).is_err());
+        assert_eq!(
+            upgraded.unlock(b"an even longer passphrase")?.public_key(),
+            signer.public_key()
+        );
+        assert_eq!(upgraded.key_id()?, legacy.key_id()?);
+        Ok(())
+    }
 
     fn fixture() -> Result<(EncryptedPrivateKeyDocument, PublicKeyDocument), KeyDocumentError> {
         encrypt_seed(
